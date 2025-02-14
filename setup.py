@@ -39,10 +39,12 @@ if "pytorch" in frameworks:
 elif "jax" in frameworks:
     install_and_import("pybind11[global]")
     from pybind11.setup_helpers import build_ext as BuildExtension
+elif "musa" in frameworks:
+    from torch_musa.utils.musa_extension import BuildExtension
 
 
 CMakeBuildExtension = get_build_ext(BuildExtension)
-archs = cuda_archs()
+# archs = cuda_archs()
 
 
 class TimedBdist(bdist_wheel):
@@ -57,7 +59,7 @@ class TimedBdist(bdist_wheel):
 
 def setup_common_extension() -> CMakeExtension:
     """Setup CMake extension for common library"""
-    cmake_flags = ["-DCMAKE_CUDA_ARCHITECTURES={}".format(archs)]
+    cmake_flags = [] # ["-DCMAKE_CUDA_ARCHITECTURES={}".format(archs)]
     if bool(int(os.getenv("NVTE_UB_WITH_MPI", "0"))):
         assert (
             os.getenv("MPI_HOME") is not None
@@ -69,7 +71,7 @@ def setup_common_extension() -> CMakeExtension:
 
     return CMakeExtension(
         name="transformer_engine",
-        cmake_path=root_path / Path("transformer_engine/common"),
+        cmake_path=root_path / Path("transformer_engine/musa/common"),
         cmake_flags=cmake_flags,
     )
 
@@ -161,6 +163,16 @@ if __name__ == "__main__":
                         "transformer_engine/jax/csrc",
                         current_file_path / "transformer_engine" / "jax" / "csrc",
                         current_file_path / "transformer_engine",
+                    )
+                )
+            if "musa" in frameworks:
+                from build_tools.pytorch_musa import setup_pytorch_extension
+
+                ext_modules.append(
+                    setup_pytorch_extension(
+                        "transformer_engine/musa/pytorch/csrc",
+                        current_file_path / "transformer_engine" / "musa" / "pytorch" / "csrc",
+                        current_file_path / "transformer_engine" / "musa",
                     )
                 )
 

@@ -216,7 +216,7 @@ def cuda_version() -> Tuple[int, ...]:
 def get_frameworks() -> List[str]:
     """DL frameworks to build support for"""
     _frameworks: List[str] = []
-    supported_frameworks = ["pytorch", "jax"]
+    supported_frameworks = ["pytorch", "jax", "musa"]
 
     # Check environment variable
     if os.getenv("NVTE_FRAMEWORK"):
