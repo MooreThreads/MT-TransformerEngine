@@ -87,7 +87,12 @@ list(APPEND transformer_engine_SOURCES
   activation/gelu.mu
   activation/relu.mu
   activation/swiglu.mu
+  comm_gemm_overlap/comm_gemm_overlap.cpp
+  comm_gemm_overlap/userbuffers/ipcsocket.cc
+  comm_gemm_overlap/userbuffers/userbuffers-host.cpp
+  # comm_gemm_overlap/userbuffers/userbuffers.mu
   fused_attn/fused_attn.cpp
+  fused_attn/thd_utils.mu
   fused_rope/fused_rope.mu
   fused_softmax/scaled_aligned_causal_masked_softmax.mu
   fused_softmax/scaled_masked_softmax.mu

@@ -20,21 +20,21 @@
 #include <mudnn.h>
 #include <torch/extension.h>
 #include <torch/torch.h>
-// #include <transformer_engine/activation.h>
+#include <transformer_engine/activation.h>
 #include <transformer_engine/cast.h>
-// #include <transformer_engine/cast_transpose_noop.h>
-// #include <transformer_engine/comm_gemm_overlap.h>
-// #include <transformer_engine/fused_attn.h>
-// #include <transformer_engine/fused_rope.h>
-// #include <transformer_engine/gemm.h>
+#include <transformer_engine/cast_transpose_noop.h>
+#include <transformer_engine/comm_gemm_overlap.h>
+#include <transformer_engine/fused_attn.h>
+#include <transformer_engine/fused_rope.h>
+#include <transformer_engine/gemm.h>
 // #include <transformer_engine/normalization.h>
-// #include <transformer_engine/padding.h>
-// #include <transformer_engine/permutation.h>
-// #include <transformer_engine/recipe.h>
-// #include <transformer_engine/softmax.h>
-// #include <transformer_engine/swizzle.h>
-// #include <transformer_engine/transformer_engine.h>
-// #include <transformer_engine/transpose.h>
+#include <transformer_engine/padding.h>
+#include <transformer_engine/permutation.h>
+#include <transformer_engine/recipe.h>
+#include <transformer_engine/softmax.h>
+#include <transformer_engine/swizzle.h>
+#include <transformer_engine/transformer_engine.h>
+#include <transformer_engine/transpose.h>
 
 #include <torch_musa/csrc/aten/musa/MUSAGraphsUtils.muh>
 #include <cassert>
