@@ -14,6 +14,8 @@ try:
 except (ImportError, StopIteration) as e:
     pass
 
+from . import musa
+
 try:
     from . import jax
 except (ImportError, StopIteration) as e:

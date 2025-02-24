@@ -16,6 +16,36 @@
 #include "common.h"
 #include "transformer_engine/transformer_engine.h"
 
+#if TORCH_VERSION_MAJOR < 2 || (TORCH_VERSION_MAJOR == 2 && TORCH_VERSION_MINOR < 4)
+namespace pybind11::detail {
+
+template <>
+struct type_caster<at::ScalarType> {
+ public:
+  PYBIND11_TYPE_CASTER(at::ScalarType, _("torch.dtype"));
+
+  type_caster() : value(at::kFloat) {}
+
+  bool load(handle src, bool) {
+    PyObject* obj = src.ptr();
+    if (THPDtype_Check(obj)) {
+      value = reinterpret_cast<THPDtype*>(obj)->scalar_type;
+      return true;
+    }
+    return false;
+  }
+
+  static handle cast(
+      const at::ScalarType& src,
+      return_value_policy /* policy */,
+      handle /* parent */) {
+    return Py_NewRef(torch::getTHPDtype(src));
+  }
+};
+
+} // namespace pybind11::detail
+#endif
+
 namespace transformer_engine::pytorch {
 
 extern PyTypeObject *Float8TensorPythonClass;
