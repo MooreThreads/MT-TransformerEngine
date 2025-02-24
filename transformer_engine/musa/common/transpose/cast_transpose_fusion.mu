@@ -12,6 +12,7 @@
 #include <numeric>
 #include <type_traits>
 
+#include "../util/cast_kernels.muh"
 #include "../util/math.h"
 #include "../util/rtc.h"
 #include "../util/string.h"
@@ -1232,7 +1233,7 @@ void dgated_act_cast_transpose(const Tensor &input, const Tensor &gated_act_inpu
 }
 
 // Explicit template instantiation
-template void cast_transpose_fused<true, false, false, float, transformer_engine::Empty, nullptr>(
+template void cast_transpose_fused<true, false, false, float, transformer_engine::Empty, detail::identity>(
     const Tensor &, const Tensor *, Tensor *, Tensor *, Tensor *, musaStream_t);
 #define NVTE_INSTANTIATE_ACTIVATION(op)                                                    \
   template void cast_transpose_fused<false, false, true, float, transformer_engine::Empty, \
