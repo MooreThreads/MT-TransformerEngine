@@ -148,7 +148,7 @@ else:
         _flash_attn_is_installed = True
 
     if _flash_attn_is_installed:
-        from flash_attn_2_cuda import varlen_bwd as flash_attn_cuda_bwd
+        # from flash_attn_2_cuda import varlen_bwd as flash_attn_cuda_bwd
         from flash_attn.flash_attn_interface import flash_attn_func, flash_attn_varlen_func
         from flash_attn.flash_attn_interface import _flash_attn_forward as _flash_attn_fwd
         from flash_attn.flash_attn_interface import _flash_attn_backward as _flash_attn_bwd

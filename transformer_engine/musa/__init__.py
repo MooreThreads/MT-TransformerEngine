@@ -4,8 +4,10 @@ import torch.utils
 import torch.utils.data
 import torch_musa
 
+
 def patch_before_import_te():
-    pass
+    from .pytorch import fp8
+
 
 def patch_after_import_torch():
     torch.cuda.is_available = torch.musa.is_available
@@ -141,6 +143,7 @@ def patch_after_import_torch():
     os.environ["NVTE_TORCH_COMPILE"] = "0"
     os.environ["TORCHDYNAMO_DISABLE"] = "1"
 
+
 def py_patch():
     if sys.version_info >= (3.9, 0):
         return
@@ -149,6 +152,7 @@ def py_patch():
         return abs(a * b) // math.gcd(a, b)
     math.lcm = lcm
     return
+
 
 py_patch()
 patch_before_import_te()
