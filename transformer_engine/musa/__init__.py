@@ -10,6 +10,22 @@ def patch_before_import_te():
 
 
 def patch_after_import_torch():
+    def hook_cuda_device(device):
+        if isinstance(device, str) and device.startswith("cuda"):
+            return device.replace("cuda", "musa")
+        if isinstance(device, torch.device) and device.type == "cuda":
+            return torch.device("musa", device.index)
+        return device
+
+    def maybe_hook_cuda_args(args, kwargs):
+        new_args = []
+        for arg in args:
+            new_args.append(hook_cuda_device(arg))
+        if "device" in kwargs:
+            v = kwargs["device"]
+            kwargs['device'] = hook_cuda_device(v)
+        return tuple(new_args), kwargs
+
     torch.cuda.is_available = torch.musa.is_available
     torch.cuda.current_device = lambda : f'musa:{torch.musa.current_device()}'
     torch.cuda.device_count = torch.musa.device_count
@@ -40,8 +56,7 @@ def patch_after_import_torch():
 
     original_tensor = torch.tensor
     def patched_tensor(*args, **kwargs):
-        if 'device' in kwargs and kwargs['device'] == 'cuda':
-            kwargs['device'] = 'musa'
+        args, kwargs = maybe_hook_cuda_args(args, kwargs)
         result = original_tensor(*args, **kwargs)
         return result
     torch.tensor = patched_tensor
@@ -54,37 +69,28 @@ def patch_after_import_torch():
 
     original_zeros = torch.zeros
     def patched_zeros(*args, **kwargs):
-        if 'device' in kwargs and kwargs['device'] == 'cuda':
-            kwargs['device'] = 'musa'
+        args, kwargs = maybe_hook_cuda_args(args, kwargs)
         result = original_zeros(*args, **kwargs)
         return result
     torch.zeros = patched_zeros
 
     original_ones = torch.ones
     def patched_ones(*args, **kwargs):
-        if 'device' in kwargs:
-            v = kwargs['device']
-            if isinstance(v, str) and v.startswith("cuda"):
-                v = v.replace('cuda', 'musa')
-            elif isinstance(v, torch.device) and v.type == "cuda":
-                v = torch.device("musa", v.index)
-            kwargs['device'] = v
+        args, kwargs = maybe_hook_cuda_args(args, kwargs)
         result = original_ones(*args, **kwargs)
         return result
     torch.ones = patched_ones
 
     original_empty = torch.empty
     def patched_empty(*args, **kwargs):
-        if 'device' in kwargs and kwargs['device'] == 'cuda':
-            kwargs['device'] = 'musa'
+        args, kwargs = maybe_hook_cuda_args(args, kwargs)
         result = original_empty(*args, **kwargs)
         return result
     torch.empty = patched_empty
 
     original_rand = torch.rand
     def patched_rand(*args, **kwargs):
-        if 'device' in kwargs and kwargs['device'] == 'cuda':
-            kwargs['device'] = 'musa'
+        args, kwargs = maybe_hook_cuda_args(args, kwargs)
         result = original_rand(*args, **kwargs)
         return result
     torch.rand = patched_rand
@@ -115,28 +121,14 @@ def patch_after_import_torch():
 
     origin_module_to = torch.nn.Module.to
     def patched_module_to(self, *args, **kwargs):
-        new_args = []
-        for arg in args:
-            if isinstance(arg, str) and arg.startswith("cuda"):
-                new_args.append(arg.replace("cuda", "musa"))
-            if isinstance(arg, torch.device) and arg.type == "cuda":
-                new_args.append(torch.device("musa", arg.index))
-            else:
-                new_args.append(arg)
-        return origin_module_to(self, *new_args, **kwargs)
+        args, kwargs = maybe_hook_cuda_args(args, kwargs)
+        return origin_module_to(self, *args, **kwargs)
     torch.nn.Module.to = patched_module_to
 
     origin_tensor_to = torch.Tensor.to
     def patched_tensor_to(self, *args, **kwargs):
-        new_args = []
-        for arg in args:
-            if isinstance(arg, str) and arg.startswith("cuda"):
-                new_args.append(arg.replace("cuda", "musa"))
-            if isinstance(arg, torch.device) and arg.type == "cuda":
-                new_args.append(torch.device("musa", arg.index))
-            else:
-                new_args.append(arg)
-        return origin_tensor_to(self, *new_args, **kwargs)
+        args, kwargs = maybe_hook_cuda_args(args, kwargs)
+        return origin_tensor_to(self, *args, **kwargs)
     torch.Tensor.to = patched_tensor_to
 
     import os
