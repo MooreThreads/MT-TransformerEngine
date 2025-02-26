@@ -33,7 +33,12 @@ def mode_from_th_dtype(th_dtype):
 
 
 def te_dtype_from_th_dtype(th_dtype):
-    assert th_dtype in [torch.float8_e5m2, torch.float8_e4m3fn]
+    if th_dtype == torch.bfloat16:
+        return tex.DType.kBFloat16
+    if th_dtype == torch.float16:
+        return tex.DType.kFloat16
+    if th_dtype == torch.float:
+        return tex.DType.kFloat32
     if th_dtype == torch.float8_e5m2:
         return tex.DType.kFloat8E5M2
     return tex.DType.kFloat8E4M3
