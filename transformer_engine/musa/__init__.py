@@ -7,7 +7,7 @@ import torch_musa
 
 def patch_before_import_te():
     from .pytorch import fp8
-
+    from .pytorch.cpp_extensions import cast
 
 def patch_after_import_torch():
     def hook_cuda_device(device):

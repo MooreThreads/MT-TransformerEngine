@@ -4,11 +4,17 @@ import pytest
 import transformer_engine as te
 import transformer_engine_torch as tex
 
+from transformer_engine.pytorch.cpp_extensions import (
+    cast_to_fp8,
+)
 from transformer_engine.common.recipe import (
     DelayedScaling,
 )
 from transformer_engine.pytorch.fp8 import (
     DelayedScalingRecipeState,
+)
+from transformer_engine.pytorch.tensor.float8_tensor import (
+    Float8Tensor,
 )
 
 
@@ -122,3 +128,31 @@ def test_float_cast_to_fp8_per_tensor(shape, src_dtype, dst_dtype, scale):
     )
     assert torch.equal(cpu_amax, to_cpu_cast(quantizer.amax, torch.float))
     assert torch.equal(cpu_gold, cpu_dst)
+
+
+def test_legacy_cast_to_fp8_per_tensor():
+    shape = (128, 256)
+    fake_dtype = torch.bfloat16
+    th_dtype = torch.float8_e4m3fn
+    te_dtype = te_dtype_from_th_dtype(th_dtype)
+    scale = 0.5
+
+    inp_cpu = torch.rand(shape, dtype=fake_dtype)
+    res_cpu = to_cpu_cast(inp_cpu, torch.float)
+    res_cpu = res_cpu / scale
+    res_cpu = to_cpu_cast(res_cpu.to(th_dtype), torch.float)
+
+    inp_musa = inp_cpu.to(dev).zero_().to(th_dtype)
+    te_tensor = Float8Tensor(
+        shape=shape,
+        dtype=fake_dtype,
+        data=inp_musa.view(torch.uint8),
+        fp8_scale_inv = torch.tensor([scale], dtype=torch.float32, device=dev),
+        fp8_dtype=te_dtype,
+        data_transpose=None,
+        quantizer=None,
+    )
+    cast_to_fp8(inp_cpu.to(dev), te_tensor)
+    res_musa = to_cpu_cast(te_tensor._data.view(th_dtype), torch.float)
+
+    assert torch.equal(res_cpu, res_musa)
