@@ -150,6 +150,23 @@ class MXFP8Quantizer : public Quantizer {
       std::optional<at::Tensor> rowwise_data = std::nullopt) const override;
 };
 
+class MTFP8Quantizer : public Quantizer {
+ public:
+  DType dtype;
+  size_t block_m;
+  size_t block_n;
+
+  explicit MTFP8Quantizer(const py::handle& quantizer);
+
+  NVTEScalingMode get_scaling_mode() const override { return NVTE_MTFP8_BLOCK_SCALING; }
+
+  void set_quantization_params(TensorWrapper* tensor) const override;
+
+  std::pair<TensorWrapper, py::object> create_tensor(
+      const std::vector<size_t>& shape, DType dtype,
+      std::optional<at::Tensor> rowwise_data = std::nullopt) const override;
+};
+
 std::unique_ptr<Quantizer> convert_quantizer(py::handle quantizer);
 
 std::vector<size_t> getTensorShape(at::Tensor t);

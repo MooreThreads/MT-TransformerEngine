@@ -27,6 +27,7 @@
 // #include "ptx.cuh"
 #include "transformer_engine/activation.h"
 #include "transformer_engine/transpose.h"
+#include "mtfp8_cast_kernels.muh"
 
 namespace transformer_engine {
 
@@ -346,6 +347,8 @@ void dequantize_helper(const Tensor &input, Tensor *output, musaStream_t stream)
 
   if (is_tensor_scaling(input.scaling_mode)) {
     dequantization::fp8_dequantize(input, output, stream);
+  } else if (is_mtfp_scaling(input.scaling_mode)) {
+    mtfp8_dequantize(input, output, stream);
   // } else if (is_mxfp_scaling(input.scaling_mode)) {
   //   if (is_supported_by_CC_100()) {
   //     dequantization::mxfp8_dequantize(input, output, stream);

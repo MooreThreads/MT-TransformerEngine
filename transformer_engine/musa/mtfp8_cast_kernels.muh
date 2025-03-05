@@ -1,0 +1,28 @@
+#ifndef TRANSFORMER_ENGINE_MUSA_MTFP8_CAST_KERNELS_MUH_
+#define TRANSFORMER_ENGINE_MUSA_MTFP8_CAST_KERNELS_MUH_
+
+#include <musa_runtime.h>
+
+#include "../common.h"
+#include "../utils.muh"
+#include "math.h"
+
+#include "transformer_engine/transformer_engine.h"
+
+namespace transformer_engine {
+
+template <bool IS_DBIAS, bool IS_DACT, bool IS_ACT, typename ParamOP,
+          float (*OP)(float, const ParamOP &)>
+inline
+void mtfp8_quantize(const Tensor &input, const Tensor *act_input, const Tensor *noop, Tensor *output,
+                    Tensor *dbias, Tensor *workspace, musaStream_t stream) {
+  NVTE_CHECK(false, "mtfp8_quantize not yet implememted.");
+}
+
+inline void mtfp8_dequantize(const Tensor &input, Tensor *output, musaStream_t stream) {
+  NVTE_CHECK(false, "mtfp8_dequantize not yet implememted.");
+}
+
+}  // namespace transformer_engine
+
+#endif  // TRANSFORMER_ENGINE_MUSA_MTFP8_CAST_KERNELS_MUH_

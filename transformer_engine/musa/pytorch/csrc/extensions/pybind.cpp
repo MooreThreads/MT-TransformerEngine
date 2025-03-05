@@ -28,6 +28,10 @@ PyTypeObject *MXFP8TensorPythonClass = nullptr;  /// TODO Remove
 PyTypeObject *MXFP8TensorBasePythonClass = nullptr;
 PyTypeObject *MXFP8QuantizerClass = nullptr;
 
+PyTypeObject *MTFP8TensorPythonClass = nullptr;  /// TODO Remove
+PyTypeObject *MTFP8TensorBasePythonClass = nullptr;
+PyTypeObject *MTFP8QuantizerClass = nullptr;
+
 void init_float8_extension() {
   if (Float8TensorPythonClass) return;
   auto fp8_module = py::module_::import("transformer_engine.pytorch.tensor.float8_tensor");
@@ -58,9 +62,25 @@ void init_mxfp8_extension() {
              "Internal error: could not initialize pyTorch MXFP8 extension.");
 }
 
+void init_mtfp8_extension() {
+  if (MTFP8TensorPythonClass) return;
+  auto fp8_module = py::module_::import("transformer_engine.musa.pytorch.tensor.mtfp8_tensor");
+  MTFP8QuantizerClass =
+      reinterpret_cast<PyTypeObject *>(PyObject_GetAttrString(fp8_module.ptr(), "MTFP8Quantizer"));
+  MTFP8TensorPythonClass =
+      reinterpret_cast<PyTypeObject *>(PyObject_GetAttrString(fp8_module.ptr(), "MTFP8Tensor"));
+  auto fp8_base_module =
+      py::module_::import("transformer_engine.musa.pytorch.tensor.mtfp8_tensor_base");
+  MTFP8TensorBasePythonClass = reinterpret_cast<PyTypeObject *>(
+      PyObject_GetAttrString(fp8_base_module.ptr(), "MTFP8TensorBase"));
+  NVTE_CHECK(MTFP8TensorPythonClass != nullptr,
+             "Internal error: could not initialize pyTorch MTFP8 extension.");
+}
+
 void init_extension() {
   init_float8_extension();
   init_mxfp8_extension();
+  init_mtfp8_extension();
 }
 
 }  // namespace transformer_engine::pytorch

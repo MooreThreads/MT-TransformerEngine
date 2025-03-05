@@ -451,6 +451,8 @@ inline bool is_delayed_tensor_scaling(const NVTEScalingMode &mode) {
 
 inline bool is_mxfp_scaling(const NVTEScalingMode &mode) { return mode == NVTE_MXFP8_1D_SCALING; }
 
+inline bool is_mtfp_scaling(const NVTEScalingMode &mode) { return mode == NVTE_MTFP8_BLOCK_SCALING; }
+
 /*! \brief Update a tensor's FP8 scale-inverse
  *
  * The FP8 scale-inverse (dequantization scaling factor) is updated

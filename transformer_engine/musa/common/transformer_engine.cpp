@@ -107,6 +107,8 @@ void CheckScaleTensorShape(const Tensor &t, const std::string &name) {
                    "\"  has invalid columnwise_scale_inv shape (expected ", expected, ", got ",
                    t.columnwise_scale_inv.shape, ")");
       }
+    } else if (is_mtfp_scaling(t.scaling_mode)) {
+      NVTE_CHECK("Not yet implemented.");
     }
   }
 }

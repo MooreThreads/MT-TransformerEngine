@@ -225,4 +225,17 @@ std::pair<TensorWrapper, py::object> MXFP8Quantizer::create_tensor(
   return {std::move(tensor), std::move(ret)};
 }
 
+MTFP8Quantizer::MTFP8Quantizer(const py::handle& quantizer) : Quantizer(quantizer) {
+}
+
+void MTFP8Quantizer::set_quantization_params(TensorWrapper* tensor) const {
+}
+
+std::pair<TensorWrapper, py::object> MTFP8Quantizer::create_tensor(
+    const std::vector<size_t>& shape, DType dtype, std::optional<at::Tensor> rowwise_data) const {
+  TensorWrapper tensor(NVTE_MTFP8_BLOCK_SCALING);
+  py::object ret;
+  return {std::move(tensor), std::move(ret)};
+}
+
 }  // namespace transformer_engine::pytorch
