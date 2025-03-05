@@ -6,7 +6,10 @@ import torch_musa
 
 
 def patch_before_import_te():
+    from .pytorch import tensor
     from .pytorch import fp8
+    from .pytorch.module import base
+    from .pytorch.ops import op
     from .pytorch.cpp_extensions import cast
 
 def patch_after_import_torch():
