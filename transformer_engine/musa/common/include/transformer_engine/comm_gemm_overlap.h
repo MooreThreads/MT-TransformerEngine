@@ -64,6 +64,7 @@ class CommOverlapCore {
   bool _ubuf_scale_inv_initialized{false};
 
   std::vector<musaStream_t> _stream_compute;
+  std::vector<at::musa::MUSAStream> _stream_comm_ce;
   musaEvent_t _start_compute, _stop_compute, _start_comm, _stop_comm, _comm_launch_event;
 
  public:
@@ -154,6 +155,10 @@ class CommOverlapBase : public CommOverlapCore {
                   bool rs_overlap_first_gemm = false);
 
   virtual ~CommOverlapBase();
+
+  void comm_userbuff_over_ce(void *rs_output, transformer_engine::DType dtype, const int chunk_idx, const int offset,
+                          const int rowelements, const int colelements, const int strideelements,
+                          bool out_of_place, bool comm_rs, bool is_pipeline, musaStream_t compute_stream);
 
   /*
   ** Bulk GEMM + COMM

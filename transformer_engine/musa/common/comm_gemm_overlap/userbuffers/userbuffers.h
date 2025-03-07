@@ -228,13 +228,16 @@ for(int slice=0;slice<ncslices;slice++)
 
  allgather2_userbuff_inplace(hndl,offset, elements*nslices,comm,stream);
 */
-inline void reducescatter2_userbuff_inplace(const int handler, const int offset, const int elements,
+inline void reducescatter2_userbuff_inplace(const int handler, transformer_engine::DType dtype, 
+                                     const int offset, const int elements,
                                      communicator *comm, musaStream_t stream = 0,
                                      musaEvent_t comm_launch_event = 0) {}
-inline void reducescatter2_userbuff(void *output, const int handler, const int offset, const int elements,
+inline void reducescatter2_userbuff(void *output, transformer_engine::DType dtype, 
+                             const int handler, const int offset, const int elements,
                              communicator *comm, musaStream_t stream = 0,
                              musaEvent_t comm_launch_event = 0) {}
-inline void reducescatter2_userbuff_stridedoutput(void *output, const int handler, const int offset,
+inline void reducescatter2_userbuff_stridedoutput(void *output, transformer_engine::DType dtype,
+                                           const int handler, const int offset,
                                            const int rowelements, const int colelements,
                                            const int strideelements, communicator *comm,
                                            musaStream_t stream = 0,
