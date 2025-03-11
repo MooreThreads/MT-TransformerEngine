@@ -18,6 +18,7 @@
 #include "common/util/system.h"
 #include "userbuffers.h"
 
+const uint64_t global_idf = 0ULL;
 #define MAX_THREADS 1024
 
 // TODO(yuzhe.wu): replace asm volatile("fence.sc.gpu;\n") temporarily and the correctness needs to be verified
@@ -1410,7 +1411,7 @@ __global__ void __launch_bounds__(MAX_THREADS)
                           reinterpret_cast<void *>(&arg5), reinterpret_cast<void *>(&arg6),        \
                           reinterpret_cast<void *>(&arg7), reinterpret_cast<void *>(&arg8),        \
                           reinterpret_cast<void *>(&arg9), reinterpret_cast<void *>(&arg10)};      \
-    NVTE_CHECK_MUSA(musaLaunchKernelExC(                                                           \
+    NVTE_CHECK_CUDA(musaLaunchKernelExC(                                                           \
         &cfg,                                                                                      \
         reinterpret_cast<void *>(comm->use_rr_kernel ? userbuffers_fp16_sum_inplace_gpu_rr_ag<x>   \
                                                      : userbuffers_fp16_sum_inplace_gpu_rw_ag<x>), \
@@ -1435,7 +1436,7 @@ __global__ void __launch_bounds__(MAX_THREADS)
                           reinterpret_cast<void *>(&arg7), reinterpret_cast<void *>(&arg8),      \
                           reinterpret_cast<void *>(&arg9), reinterpret_cast<void *>(&arg10),     \
                           reinterpret_cast<void *>(&arg11)};                                     \
-    NVTE_CHECK_MUSA(musaLaunchKernelExC(                                                         \
+    NVTE_CHECK_CUDA(musaLaunchKernelExC(                                                         \
         &cfg, reinterpret_cast<void *>(userbuffers_fp16_sum_inplace_gpu_mc_ag<x>), kernelArgs)); \
   }
 
@@ -1456,11 +1457,11 @@ __global__ void __launch_bounds__(MAX_THREADS)
                           reinterpret_cast<void *>(&arg7), reinterpret_cast<void *>(&arg8),      \
                           reinterpret_cast<void *>(&arg9), reinterpret_cast<void *>(&arg10)};    \
     if(is_bf16) {                                                                                \
-      NVTE_CHECK_MUSA(musaLaunchKernelExC(                                                             \
+      NVTE_CHECK_CUDA(musaLaunchKernelExC(                                                             \
         &cfg, reinterpret_cast<void *>(userbuffers_fp16_sum_inplace_gpu_rr_rs<x, mt_bfloat16>),  \
         kernelArgs));                                                                            \
     } else {                                                                                     \
-      NVTE_CHECK_MUSA(musaLaunchKernelExC(                                                             \
+      NVTE_CHECK_CUDA(musaLaunchKernelExC(                                                             \
         &cfg, reinterpret_cast<void *>(userbuffers_fp16_sum_inplace_gpu_rr_rs<x, half>),         \
         kernelArgs));}                                                                           \
   }
@@ -1483,7 +1484,7 @@ __global__ void __launch_bounds__(MAX_THREADS)
                           reinterpret_cast<void *>(&arg7), reinterpret_cast<void *>(&arg8),      \
                           reinterpret_cast<void *>(&arg9), reinterpret_cast<void *>(&arg10),     \
                           reinterpret_cast<void *>(&arg11)};                                     \
-    NVTE_CHECK_MUSA(musaLaunchKernelExC(                                                         \
+    NVTE_CHECK_CUDA(musaLaunchKernelExC(                                                         \
         &cfg, reinterpret_cast<void *>(userbuffers_fp16_sum_inplace_gpu_mc_rs<x>), kernelArgs)); \
   }
 
@@ -1507,11 +1508,11 @@ __global__ void __launch_bounds__(MAX_THREADS)
                           reinterpret_cast<void *>(&arg11), reinterpret_cast<void *>(&arg12), \
                           reinterpret_cast<void *>(&arg13)};                                  \
     if(is_bf16) {                                                                             \
-      NVTE_CHECK_MUSA(musaLaunchKernelExC(                                                          \
+      NVTE_CHECK_CUDA(musaLaunchKernelExC(                                                          \
         &cfg, reinterpret_cast<void *>(userbuffers_fp16_sum_inplace_gpu_rr_rs_oop<x, mt_bfloat16>), \
         kernelArgs));                                                                         \
     } else {                                                                                  \
-      NVTE_CHECK_MUSA(musaLaunchKernelExC(                                                          \
+      NVTE_CHECK_CUDA(musaLaunchKernelExC(                                                          \
         &cfg, reinterpret_cast<void *>(userbuffers_fp16_sum_inplace_gpu_rr_rs_oop<x, half>),    \
         kernelArgs));}                                                                          \
   }
@@ -1536,7 +1537,7 @@ __global__ void __launch_bounds__(MAX_THREADS)
                           reinterpret_cast<void *>(&arg9),  reinterpret_cast<void *>(&arg10),  \
                           reinterpret_cast<void *>(&arg11), reinterpret_cast<void *>(&arg12),  \
                           reinterpret_cast<void *>(&arg13), reinterpret_cast<void *>(&arg14)}; \
-    NVTE_CHECK_MUSA(musaLaunchKernelExC(                                                       \
+    NVTE_CHECK_CUDA(musaLaunchKernelExC(                                                       \
         &cfg,                                                                                  \
         reinterpret_cast<void *>(userbuffers_fp16_sum_inplace_gpu_rr_rs_oop_fp8<x, fp8type>),  \
         kernelArgs));                                                                          \
@@ -1562,7 +1563,7 @@ __global__ void __launch_bounds__(MAX_THREADS)
                           reinterpret_cast<void *>(&arg9),  reinterpret_cast<void *>(&arg10),  \
                           reinterpret_cast<void *>(&arg11), reinterpret_cast<void *>(&arg12),  \
                           reinterpret_cast<void *>(&arg13), reinterpret_cast<void *>(&arg14)}; \
-    NVTE_CHECK_MUSA(musaLaunchKernelExC(                                                       \
+    NVTE_CHECK_CUDA(musaLaunchKernelExC(                                                       \
         &cfg, reinterpret_cast<void *>(userbuffers_fp16_sum_inplace_gpu_mc_rs_oop<x>),         \
         kernelArgs));                                                                          \
   }
@@ -1592,7 +1593,7 @@ __global__ void __launch_bounds__(MAX_THREADS)
                           reinterpret_cast<void *>(&arg13), reinterpret_cast<void *>(&arg14),  \
                           reinterpret_cast<void *>(&arg15), reinterpret_cast<void *>(&arg16),  \
                           reinterpret_cast<void *>(&arg17), reinterpret_cast<void *>(&arg18)}; \
-    NVTE_CHECK_MUSA(musaLaunchKernelExC(                                                       \
+    NVTE_CHECK_CUDA(musaLaunchKernelExC(                                                       \
         &cfg,                                                                                  \
         reinterpret_cast<void *>(                                                              \
             userbuffers_fp16_sum_inplace_gpu_rr_rs_oop_atomic_fp8<x, fp8type>),                \
@@ -1618,7 +1619,7 @@ __global__ void __launch_bounds__(MAX_THREADS)
                           reinterpret_cast<void *>(&arg9),  reinterpret_cast<void *>(&arg10), \
                           reinterpret_cast<void *>(&arg11), reinterpret_cast<void *>(&arg12), \
                           reinterpret_cast<void *>(&arg13)};                                  \
-    NVTE_CHECK_MUSA(musaLaunchKernelExC(                                                      \
+    NVTE_CHECK_CUDA(musaLaunchKernelExC(                                                      \
         &cfg, reinterpret_cast<void *>(userbuffers_fp16_sum_inplace_gpu_rr_rs_oop_stride<x>), \
         kernelArgs));                                                                         \
   }
@@ -1644,7 +1645,7 @@ __global__ void __launch_bounds__(MAX_THREADS)
                           reinterpret_cast<void *>(&arg11), reinterpret_cast<void *>(&arg12),    \
                           reinterpret_cast<void *>(&arg13), reinterpret_cast<void *>(&arg14),    \
                           reinterpret_cast<void *>(&arg15)};                                     \
-    NVTE_CHECK_MUSA(musaLaunchKernelExC(                                                         \
+    NVTE_CHECK_CUDA(musaLaunchKernelExC(                                                         \
         &cfg,                                                                                    \
         reinterpret_cast<void *>(userbuffers_fp16_sum_inplace_gpu_rr_rs_oop_stride_atomic<x>),   \
         kernelArgs));                                                                            \
@@ -1671,7 +1672,7 @@ __global__ void __launch_bounds__(MAX_THREADS)
                           reinterpret_cast<void *>(&arg11), reinterpret_cast<void *>(&arg12),      \
                           reinterpret_cast<void *>(&arg13), reinterpret_cast<void *>(&arg14),      \
                           reinterpret_cast<void *>(&arg15)};                                       \
-    NVTE_CHECK_MUSA(                                                                               \
+    NVTE_CHECK_CUDA(                                                                               \
         musaLaunchKernelExC(&cfg,                                                                  \
                             reinterpret_cast<void *>(                                              \
                                 userbuffers_fp16_sum_inplace_gpu_rr_rs_oop_stride_multiatomic<x>), \
@@ -1861,18 +1862,22 @@ void reducescatter2_userbuff_inplace(const int handler, transformer_engine::DTyp
     if (comm->use_mc && (comm->memflags[handler] & UB_MEM_MC_CREATED)) {
       callranks_rsMC(2) callranks_rsMC(4) callranks_rsMC(8)
     } else {
-      callranks_rs(2) callranks_rs(4) callranks_rs(8)
+      if (dtype == transformer_engine::DType::kFloat16) {
+        callranks_rs(2, 0) callranks_rs(4, 0) callranks_rs(8, 0)
+      } else {
+        callranks_rs(2, 1) callranks_rs(4, 1) callranks_rs(8, 1)
+      }
     }
   } else {
     SETUP_LAUNCH_CONFIG(sms, warps * 32, stream);
     if (comm->use_mc && (comm->memflags[handler] & UB_MEM_MC_CREATED)) {
       callranks_rsMC(2) callranks_rsMC(4) callranks_rsMC(8)
     } else {
-        if (dtype == transformer_engine::DType::kFloat16) {
-            callranks_rs(2, 0) callranks_rs(4, 0) callranks_rs(8, 0)
-        } else {
-            callranks_rs(2, 1) callranks_rs(4, 1) callranks_rs(8, 1)
-        }
+      if (dtype == transformer_engine::DType::kFloat16) {
+        callranks_rs(2, 0) callranks_rs(4, 0) callranks_rs(8, 0)
+      } else {
+        callranks_rs(2, 1) callranks_rs(4, 1) callranks_rs(8, 1)
+      }
     }
   }
 }
@@ -1901,7 +1906,11 @@ void reducescatter2_userbuff_stridedoutput(void *output, transformer_engine::DTy
     if (comm->use_mc && (comm->memflags[handler] & UB_MEM_MC_CREATED)) {
       callranks_rs_oopMC(2) callranks_rs_oopMC(4) callranks_rs_oopMC(8)
     } else {
-      callranks_rs_oop(2) callranks_rs_oop(4) callranks_rs_oop(8)
+      if (dtype == transformer_engine::DType::kFloat16) {
+        callranks_rs_oop(2, 0) callranks_rs_oop(4, 0) callranks_rs_oop(8, 0)
+      } else {
+        callranks_rs_oop(2, 1) callranks_rs_oop(4, 1) callranks_rs_oop(8, 1)
+      }
     }
   } else {
     SETUP_LAUNCH_CONFIG(sms, warps * 32, stream);
@@ -2366,7 +2375,7 @@ void userbuffers_send(const int srchandler, const size_t srcoffset, const int ds
 
     if (comm->use_ce) {
       // kuserbuffers_inc<<<1, 1, 0, stream>>>(reinterpret_cast<int *>(ce_send_start_ptr));
-      NVTE_CHECK_MUSA(musaMemcpyAsync(dstptr, srcptr, bytes, musaMemcpyDeviceToDevice, stream));
+      NVTE_CHECK_CUDA(musaMemcpyAsync(dstptr, srcptr, bytes, musaMemcpyDeviceToDevice, stream));
       // kuserbuffers_inc<<<1, 1, 0, stream>>>(reinterpret_cast<int *>(ce_send_end_ptr));
     }
     SETUP_LAUNCH_CONFIG(signalonly ? 1 : comm->sms, signalonly ? 1 : 1024, stream);
@@ -2376,7 +2385,7 @@ void userbuffers_send(const int srchandler, const size_t srcoffset, const int ds
     void *kernelArgs[] = {reinterpret_cast<void *>(&arg1), reinterpret_cast<void *>(&arg2),
                           reinterpret_cast<void *>(&arg3), reinterpret_cast<void *>(&arg4),
                           reinterpret_cast<void *>(&arg5)};
-    NVTE_CHECK_MUSA(
+    NVTE_CHECK_CUDA(
         musaLaunchKernelExC(&cfg, reinterpret_cast<void *>(kuserbuffers_pushsend), kernelArgs));
   }
 }
@@ -2398,7 +2407,7 @@ void userbuffers_sendrecv(const int srchandler, const int dsthandler, const size
 
   if (comm->use_ce) {
     // kuserbuffers_inc<<<1, 1, 0, stream>>>(reinterpret_cast<int *>(ce_send_start_ptr));
-    NVTE_CHECK_MUSA(
+    NVTE_CHECK_CUDA(
         musaMemcpyAsync(send_dstptr, send_srcptr, bytes, musaMemcpyDeviceToDevice, stream));
     // kuserbuffers_inc<<<1, 1, 0, stream>>>(reinterpret_cast<int *>(ce_send_end_ptr));
   }
@@ -2431,7 +2440,7 @@ void userbuffers_sendrecv(const int srchandler, const int dsthandler, const size
                         reinterpret_cast<void *>(&arg11), reinterpret_cast<void *>(&arg12),
                         reinterpret_cast<void *>(&arg13), reinterpret_cast<void *>(&arg14),
                         reinterpret_cast<void *>(&arg15)};
-  NVTE_CHECK_MUSA(
+  NVTE_CHECK_CUDA(
       musaLaunchKernelExC(&cfg, reinterpret_cast<void *>(kuserbuffers_pushsendrecv), kernelArgs));
 }
 
@@ -2454,7 +2463,7 @@ void userbuffers_sendrecv_atomic(const int srchandler, const int dsthandler,
       reinterpret_cast<char *>(comm->peer_ptr[dsthandler][send_peerlocal]) + send_offset;
   if (comm->use_ce) {
     // kuserbuffers_inc<<<1, 1, 0, stream>>>(reinterpret_cast<int *>(ce_send_start_ptr));
-    NVTE_CHECK_MUSA(
+    NVTE_CHECK_CUDA(
         musaMemcpyAsync(send_dstptr, send_srcptr, bytes, musaMemcpyDeviceToDevice, stream));
     // kuserbuffers_inc<<<1, 1, 0, stream>>>(reinterpret_cast<int *>(ce_send_end_ptr));
   }
@@ -2488,7 +2497,7 @@ void userbuffers_sendrecv_atomic(const int srchandler, const int dsthandler,
                         reinterpret_cast<void *>(&arg11), reinterpret_cast<void *>(&arg12),
                         reinterpret_cast<void *>(&arg13), reinterpret_cast<void *>(&arg14),
                         reinterpret_cast<void *>(&arg15), reinterpret_cast<void *>(&arg16)};
-  NVTE_CHECK_MUSA(musaLaunchKernelExC(
+  NVTE_CHECK_CUDA(musaLaunchKernelExC(
       &cfg, reinterpret_cast<void *>(kuserbuffers_pushsendrecv_atomic), kernelArgs));
 }
 
@@ -2534,7 +2543,7 @@ void userbuffers_sendrecv_multiatomic(const int srchandler, const int dsthandler
                         reinterpret_cast<void *>(&arg13), reinterpret_cast<void *>(&arg14),
                         reinterpret_cast<void *>(&arg15), reinterpret_cast<void *>(&arg16),
                         reinterpret_cast<void *>(&arg17), reinterpret_cast<void *>(&arg18)};
-  NVTE_CHECK_MUSA(musaLaunchKernelExC(
+  NVTE_CHECK_CUDA(musaLaunchKernelExC(
       &cfg, reinterpret_cast<void *>(kuserbuffers_pushsendrecv_multiatomic), kernelArgs));
 }
 
@@ -2560,7 +2569,7 @@ void userbuffers_recv(const int srchandler, const size_t srcoffset, const int ds
     if (!signalonly)
       kuserbuffers_inc<<<1, 1, 0, stream>>>(&(comm->recv_id[peer * NVTE_MAX_REGIONS + dsthandler]));
     if (comm->use_ce) {
-      NVTE_CHECK_MUSA(musaMemcpyAsync(dstptr, srcptr, bytes, musaMemcpyDeviceToDevice, stream));
+      NVTE_CHECK_CUDA(musaMemcpyAsync(dstptr, srcptr, bytes, musaMemcpyDeviceToDevice, stream));
     }
   } else {
     kuserbuffers_pushrecv<<<1, 1, 0, stream>>>(

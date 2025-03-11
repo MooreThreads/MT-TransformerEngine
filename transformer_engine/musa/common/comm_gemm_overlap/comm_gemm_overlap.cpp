@@ -63,7 +63,7 @@ CommOverlapCore::CommOverlapCore(int myrank, int numranks, int mylocal, int numl
   _cga_size = comm_cga_size;
 
   if (gemm_priority == 0 && comm_priority == 0) {
-    transformer_engine::musa::stream_priority_range(&_gemm_priority, &_comm_priority);
+    transformer_engine::cuda::stream_priority_range(&_gemm_priority, &_comm_priority);
   } else {
     _gemm_priority = gemm_priority;
     _comm_priority = comm_priority;
@@ -78,7 +78,7 @@ CommOverlapCore::CommOverlapCore(int myrank, int numranks, int mylocal, int numl
     // need tp_size-1 streams for comm with peers
     for (int i = 0; i < tp_size - 1; i++) {
       musaStream_t stream;
-      CHECK_CUDA(musaStreamCreateWithPriority(&stream, musaStreamNonBlocking, comm_priority));
+      NVTE_CHECK_CUDA(musaStreamCreateWithPriority(&stream, musaStreamNonBlocking, comm_priority));
       _stream_comm_ce.push_back(std::move(stream));
     }
   }
@@ -224,11 +224,11 @@ CommOverlapBase::CommOverlapBase(const std::vector<size_t> &buffer_shape, DType 
                                  int numnodes, int tp_size, ExtAllgatherOp allgather_handle,
                                  ExtBarrierOp barrier_handle, int num_splits, int num_max_streams,
                                  int comm_cga_size, int gemm_priority, int comm_priority,
-                                 int num_comm_sm, bool set_sm_margin, bool atomic_gemm,
+                                 int num_comm_sm, bool set_sm_margin, bool atomic_gemm, bool use_ce,
                                  bool rs_overlap_first_gemm)
     : CommOverlapCore(myrank, numranks, mylocal, numlocal, mynode, numnodes, tp_size,
                       allgather_handle, barrier_handle, num_splits, num_max_streams, comm_cga_size,
-                      gemm_priority, comm_priority, num_comm_sm, set_sm_margin, false,
+                      gemm_priority, comm_priority, num_comm_sm, set_sm_margin, use_ce,
                       atomic_gemm) {
   _rs_overlap_first_gemm = rs_overlap_first_gemm;
   _rs_kernel_type = getenv<int>("NVTE_RS_STRIDED_ATOMIC", 0);
@@ -278,31 +278,32 @@ void CommOverlapBase::comm_userbuff_over_ce(void *rs_output, transformer_engine:
         char* peer_comm_ptr = reinterpret_cast<char *>(_ub_comm->peer_ptr[0][(_tp_id + i) % _tp_size]);
         void* peer_gpu_flag = peer_comm_ptr + gpu_flag_offset + (chunk_idx + _num_splits) * sizeof(uint64_t);
         
-        CHECK_MUSA_DRIVER(muMemoryAtomicValueAsync(
+        NVTE_CHECK_CUDA_DRIVER(muMemoryAtomicValueAsync(
                             (MUdeviceptr)peer_gpu_flag,
                             1,
                             MUatomicValueType::MU_ATOMIC_VALUE_TYPE_ATOMIC_ADD64,
                             (MUstream)_stream_comm_ce[i - 1]));
       }
-      CHECK_MUSA_DRIVER(muStreamWaitValue64(
+      NVTE_CHECK_CUDA_DRIVER(muStreamWaitValue64(
                             (MUstream)_stream_comm,
                             (MUdeviceptr)my_gpu_flag_sync,
                             (muuint64_t)(_tp_size - 1),
                             MUstreamWaitValue_flags::MU_STREAM_WAIT_VALUE_EQ));
 
-    //   CHECK_MUSA_DRIVER(muMemoryAtomicValueAsync(
+    //   NVTE_CHECK_CUDA_DRIVER(muMemoryAtomicValueAsync(
     //                         (MUdeviceptr)my_gpu_flag_sync,
     //                         (muuint64_t)(_tp_size - 1),
     //                         MUatomicValueType::MU_ATOMIC_VALUE_TYPE_ATOMIC_SUB64,
     //                         (MUstream)_stream_comm));
-    //   CHECK_CUDA(musaMemsetAsync(my_gpu_flag_sync, 0, sizeof(uint64_t), _stream_comm));
+    //   NVTE_CHECK_CUDA(musaMemsetAsync(my_gpu_flag_sync, 0, sizeof(uint64_t), _stream_comm));
 
-      CHECK_MUSA_DRIVER(muStreamWriteValue64(
+      NVTE_CHECK_CUDA_DRIVER(muStreamWriteValue64(
                                 (MUstream)_stream_comm,
                                 (MUdeviceptr)my_gpu_flag_sync,
                                 0,
                                 MUstreamWriteValue_flags::MU_STREAM_WRITE_VALUE_DEFAULT));
     }
+    NVTE_CHECK_CUDA(musaStreamSynchronize(_stream_comm));
     
     for (int i = 1; i < _tp_size; i++) {
       size_t my_offset = 0;
@@ -317,17 +318,17 @@ void CommOverlapBase::comm_userbuff_over_ce(void *rs_output, transformer_engine:
       int peer = (_tp_id + i) % _tp_size;
       void* my_ptr = reinterpret_cast<char *>(_ub_comm->mem_ptr[_ub_reg]) + my_offset_bytes;
       void* peer_ptr = reinterpret_cast<char *>(_ub_comm->peer_ptr[_ub_reg][peer]) + my_offset_bytes;
-      
+
       // pull mode
       if (comm_rs) {
-        CHECK_MUSA_DRIVER(muMemoryAtomicAsync(
+        NVTE_CHECK_CUDA_DRIVER(muMemoryAtomicAsync(
                             (MUdeviceptr)my_ptr,
                             (MUdeviceptr)peer_ptr,
                             slice,
                             atomicType,
                             (MUstream)_stream_comm_ce[i - 1]));
       } else {
-        CHECK_CUDA(musaMemcpyAsync(
+        NVTE_CHECK_CUDA(musaMemcpyAsync(
                             my_ptr,
                             peer_ptr,
                             slice_bytes,
@@ -336,25 +337,25 @@ void CommOverlapBase::comm_userbuff_over_ce(void *rs_output, transformer_engine:
       }
 
       // TODO: maybe we can remove wait in AG for higher perf
-      CHECK_MUSA_DRIVER(muMemoryAtomicValueAsync(
+      NVTE_CHECK_CUDA_DRIVER(muMemoryAtomicValueAsync(
                             (MUdeviceptr)my_gpu_flag_rs,
                             1,
                             MUatomicValueType::MU_ATOMIC_VALUE_TYPE_ATOMIC_ADD64,
                             (MUstream)_stream_comm_ce[i - 1]));
   }
 
-    CHECK_MUSA_DRIVER(muStreamWaitValue64(
+    NVTE_CHECK_CUDA_DRIVER(muStreamWaitValue64(
                             _stream_comm,
                             (MUdeviceptr)my_gpu_flag_rs,
                             (muuint64_t)(_tp_size - 1),
                             MUstreamWaitValue_flags::MU_STREAM_WAIT_VALUE_EQ));
     
     //TODO: this sync will affect perf, we try to remove it; but process will hang in thousands iters when we simply remove it 
-    CHECK_CUDA(musaStreamSynchronize(_stream_comm));
+    NVTE_CHECK_CUDA(musaStreamSynchronize(_stream_comm));
 
     if (out_of_place) {
       void* ubuffer_ptr = reinterpret_cast<char*>(_ub_comm->mem_ptr[_ub_reg]) + (offset + _tp_id * slice) * _ubuf.element_size();
-      CHECK_CUDA(musaMemcpy2DAsync(
+      NVTE_CHECK_CUDA(musaMemcpy2DAsync(
                             (void *)rs_output,
                             strideelements * _ubuf.element_size(),
                             (void *)ubuffer_ptr,
@@ -364,13 +365,13 @@ void CommOverlapBase::comm_userbuff_over_ce(void *rs_output, transformer_engine:
                             musaMemcpyDeviceToDevice,
                             _stream_comm));
     }
-    //   CHECK_MUSA_DRIVER(muMemoryAtomicValueAsync(
+    //   NVTE_CHECK_CUDA_DRIVER(muMemoryAtomicValueAsync(
     //                         (MUdeviceptr)my_gpu_flag_rs,
     //                         (muuint64_t)(_tp_size - 1),
     //                         MUatomicValueType::MU_ATOMIC_VALUE_TYPE_ATOMIC_SUB64,
     //                         (MUstream)_stream_comm));
-    // CHECK_CUDA(musaMemsetAsync(my_gpu_flag_rs, 0, sizeof(uint64_t), _stream_comm));
-    CHECK_MUSA_DRIVER(muStreamWriteValue64(
+    // NVTE_CHECK_CUDA(musaMemsetAsync(my_gpu_flag_rs, 0, sizeof(uint64_t), _stream_comm));
+    NVTE_CHECK_CUDA_DRIVER(muStreamWriteValue64(
                                 (MUstream)_stream_comm,
                                 (MUdeviceptr)my_gpu_flag_rs,
                                 0,
@@ -602,10 +603,10 @@ void CommOverlapBase::split_overlap_rs(const TensorWrapper &A, bool transa, cons
           musaEventRecord(_start_comm, _stream_compute[(i - 1) % _stream_compute.size()]));
       if (_use_ce) {
         for (int j = 0; j < _tp_size - 1; j++) {
-          CHECK_CUDA(musaStreamWaitEvent((musaStream_t)_stream_comm_ce[j], _start_comm, 0));
+          NVTE_CHECK_CUDA(musaStreamWaitEvent((musaStream_t)_stream_comm_ce[j], _start_comm, 0));
         }
       } else {
-        CHECK_CUDA(musaStreamWaitEvent((musaStream_t)_stream_comm, _start_comm, 0));
+        NVTE_CHECK_CUDA(musaStreamWaitEvent((musaStream_t)_stream_comm, _start_comm, 0));
       }
 
       // Communication chunk
@@ -641,7 +642,7 @@ void CommOverlapBase::split_overlap_rs(const TensorWrapper &A, bool transa, cons
               rs_output_ptr, D.scale_inv(), _ub_reg, (_num_splits - 1) * output_chunk_size, m_chunk,
               n, m, _ub_comm, _stream_comm););
     } else {
-      reducescatter2_userbuff_stridedoutput(rs_output_ptr, _ub_reg,
+      reducescatter2_userbuff_stridedoutput(rs_output_ptr, A.dtype(), _ub_reg,
                                             (_num_splits - 1) * output_chunk_size, m_chunk, n, m,
                                             _ub_comm, _stream_comm);
     }
@@ -661,10 +662,10 @@ void CommOverlapBase::split_overlap_rs(const TensorWrapper &A, bool transa, cons
       // NVTE_CHECK_CUDA(musaStreamWaitEvent(_stream_comm, _start_comm, 0));
       if (_use_ce) {
         for (int j = 0; j < _tp_size - 1; j++) {
-          CHECK_CUDA(musaStreamWaitEvent((musaStream_t)_stream_comm_ce[j], _start_comm, 0));
+          NVTE_CHECK_CUDA(musaStreamWaitEvent((musaStream_t)_stream_comm_ce[j], _start_comm, 0));
         }
       } else {
-        CHECK_CUDA(musaStreamWaitEvent((musaStream_t)_stream_comm, _start_comm, 0));
+        NVTE_CHECK_CUDA(musaStreamWaitEvent((musaStream_t)_stream_comm, _start_comm, 0));
       }
 
       // Communication chunk. Uses MAX_SM at the last chunk

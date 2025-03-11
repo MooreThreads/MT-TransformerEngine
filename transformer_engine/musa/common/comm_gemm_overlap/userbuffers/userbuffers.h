@@ -16,6 +16,7 @@
 #include <stdexcept>
 
 #include "common/util/logging.h"
+#include "transformer_engine/transformer_engine.h"
 
 #ifdef NVTE_UB_WITH_MPI
 #include <mpi.h>
@@ -161,10 +162,10 @@ struct communicator {
 };
 typedef struct communicator communicator;
 
-inline void producer(void *atomic_ptr, int chunk_i, musaStream_t stream) {}
-inline void consumer(void *atomic_ptr, int chunk_i, musaStream_t stream) {}
-inline void consumer_batch(void *atomic_ptr, int first_chunk_i, int num_chunks, musaStream_t stream) {}
-inline void reset_counters(void *atomic_ptr, int num_chunks, bool allgather, musaStream_t stream) {}
+void producer(void *atomic_ptr, int chunk_i, musaStream_t stream);
+void consumer(void *atomic_ptr, int chunk_i, musaStream_t stream);
+void consumer_batch(void *atomic_ptr, int first_chunk_i, int num_chunks, musaStream_t stream);
+void reset_counters(void *atomic_ptr, int num_chunks, bool allgather, musaStream_t stream);
 
 /*  creates communicator, allocates all internal buffers if necessary */
 int create_communicator_grouped2(communicator **comm, int myrank, int numranks, int mylocal,
@@ -212,9 +213,9 @@ int register_user_buffer_collective(void **gpubuff, size_t bytes, communicator *
 */
 
 // for TP-parallelism, only single node is implemented
-inline void allgather2_userbuff_inplace(const int handler, const int offset, const int elements,
+void allgather2_userbuff_inplace(const int handler, const int offset, const int elements,
                                  communicator *comm, musaStream_t stream = 0,
-                                 musaEvent_t comm_launch_event = 0) {}
+                                 musaEvent_t comm_launch_event = 0);
 /*
 each Rank input is
 allgather2_userbuff_inplace: offset+myrank*elements
@@ -228,56 +229,56 @@ for(int slice=0;slice<ncslices;slice++)
 
  allgather2_userbuff_inplace(hndl,offset, elements*nslices,comm,stream);
 */
-inline void reducescatter2_userbuff_inplace(const int handler, transformer_engine::DType dtype, 
+void reducescatter2_userbuff_inplace(const int handler, transformer_engine::DType dtype, 
                                      const int offset, const int elements,
                                      communicator *comm, musaStream_t stream = 0,
-                                     musaEvent_t comm_launch_event = 0) {}
-inline void reducescatter2_userbuff(void *output, transformer_engine::DType dtype, 
+                                     musaEvent_t comm_launch_event = 0);
+void reducescatter2_userbuff(void *output, transformer_engine::DType dtype, 
                              const int handler, const int offset, const int elements,
                              communicator *comm, musaStream_t stream = 0,
-                             musaEvent_t comm_launch_event = 0) {}
-inline void reducescatter2_userbuff_stridedoutput(void *output, transformer_engine::DType dtype,
+                             musaEvent_t comm_launch_event = 0);
+void reducescatter2_userbuff_stridedoutput(void *output, transformer_engine::DType dtype,
                                            const int handler, const int offset,
                                            const int rowelements, const int colelements,
                                            const int strideelements, communicator *comm,
                                            musaStream_t stream = 0,
-                                           musaEvent_t comm_launch_event = 0) {}
+                                           musaEvent_t comm_launch_event = 0);
 template <typename fp8type>
-inline void reducescatter2_userbuff_stridedoutput_fp8(void *output, float *scale, const int handler,
+void reducescatter2_userbuff_stridedoutput_fp8(void *output, float *scale, const int handler,
                                                const int offset, const int rowelements,
                                                const int colelements, const int strideelements,
                                                communicator *comm, musaStream_t stream = 0,
-                                               musaEvent_t comm_launch_event = 0) {}
+                                               musaEvent_t comm_launch_event = 0);
 template <typename fp8type>
-inline void reducescatter2_userbuff_fp8(void *output, float *scale, const int handler, const int offset,
+void reducescatter2_userbuff_fp8(void *output, float *scale, const int handler, const int offset,
                                  const int elements, communicator *comm, musaStream_t stream = 0,
-                                 musaEvent_t comm_launch_event = 0) {}
+                                 musaEvent_t comm_launch_event = 0);
 template <typename fp8type>
-inline void reducescatter2_userbuff_strided_atomic_fp8(void *output, float *scale, const int handler,
+void reducescatter2_userbuff_strided_atomic_fp8(void *output, float *scale, const int handler,
                                                 const int offset, const int rowelements,
                                                 const int colelements, const int strideelements_out,
                                                 const int strideelements_in, const int numchunks,
                                                 void *counters, communicator *comm,
-                                                musaStream_t stream = 0) {}
+                                                musaStream_t stream = 0);
 template <typename fp8type>
-inline void reducescatter2_userbuff_strided_multiatomic_fp8(
+void reducescatter2_userbuff_strided_multiatomic_fp8(
     void *output, float *scale, const int handler, const int offset, const int rowelements,
     const int colelements, const int strideelements_out, const int strideelements_in,
-    const int numchunks, void *counters, communicator *comm, musaStream_t stream = 0) {}
-inline void reducescatter2_userbuff_strided(void *output, const int handler, const int offset,
+    const int numchunks, void *counters, communicator *comm, musaStream_t stream = 0);
+void reducescatter2_userbuff_strided(void *output, const int handler, const int offset,
                                      const int rowelements, const int colelements,
                                      const int strideelements, communicator *comm,
-                                     musaStream_t stream = 0) {}
-inline void reducescatter2_userbuff_strided_atomic(void *output, const int handler, const int offset,
+                                     musaStream_t stream = 0);
+void reducescatter2_userbuff_strided_atomic(void *output, const int handler, const int offset,
                                             const int rowelements, const int colelements,
                                             const int strideelements, const int numchunks,
                                             void *counters, communicator *comm,
-                                            musaStream_t stream = 0) {}
-inline void reducescatter2_userbuff_strided_multiatomic(void *output, const int handler, const int offset,
+                                            musaStream_t stream = 0);
+void reducescatter2_userbuff_strided_multiatomic(void *output, const int handler, const int offset,
                                                  const int rowelements, const int colelements,
                                                  const int strideelements, const int numchunks,
                                                  void *counters, communicator *comm,
-                                                 musaStream_t stream = 0) {}
+                                                 musaStream_t stream = 0);
 /* everything should be 16byte aligned = 8 elts aligned
 output is strided: row starts separated by stride elements*/
 
@@ -289,24 +290,24 @@ output is strided: row starts separated by stride elements*/
 // push model: data arrived and visible at receiver(barrier enforced)
 // pull model: data ready to be pulled by receiver(no barrier needed)
 
-inline void userbuffers_send(const int srchandler, const size_t srcoffset, const int dsthandler,
+void userbuffers_send(const int srchandler, const size_t srcoffset, const int dsthandler,
                       const size_t dstoffset, const size_t bytes, communicator *comm,
-                      const int peer, musaStream_t stream = 0) {}
-inline void userbuffers_recv(const int srchandler, const size_t srcoffset, const int dsthandler,
+                      const int peer, musaStream_t stream = 0);
+void userbuffers_recv(const int srchandler, const size_t srcoffset, const int dsthandler,
                       const size_t dstoffset, const size_t bytes, communicator *comm,
-                      const int peer, musaStream_t stream = 0) {}
-inline void userbuffers_sendrecv(const int srchandler, const int dsthandler, const size_t send_offset,
+                      const int peer, musaStream_t stream = 0);
+void userbuffers_sendrecv(const int srchandler, const int dsthandler, const size_t send_offset,
                           const size_t recv_offset, const size_t bytes, communicator *comm,
-                          const int send_peer, const int recv_peer, musaStream_t stream = 0) {}
-inline void userbuffers_sendrecv_atomic(const int srchandler, const int dsthandler,
+                          const int send_peer, const int recv_peer, musaStream_t stream = 0);
+void userbuffers_sendrecv_atomic(const int srchandler, const int dsthandler,
                                  const size_t send_offset, const size_t recv_offset,
                                  const size_t bytes, communicator *comm, const int send_peer,
-                                 const int recv_peer, void *counters, musaStream_t stream = 0) {}
-inline void userbuffers_sendrecv_multiatomic(const int srchandler, const int dsthandler,
+                                 const int recv_peer, void *counters, musaStream_t stream = 0);
+void userbuffers_sendrecv_multiatomic(const int srchandler, const int dsthandler,
                                       const size_t send_offset, const size_t recv_offset,
                                       const size_t bytes, communicator *comm, const int send_peer,
                                       const int recv_peer, const int nchunks, void *counters,
-                                      bool shuffle, musaStream_t stream = 0) {}
+                                      bool shuffle, musaStream_t stream = 0);
 
 // alltoall split send and recv to allow for overlap
 // send kicks in sending data to the destination - invoke on same stream as data generation
@@ -322,9 +323,9 @@ inline void userbuffers_sendrecv_multiatomic(const int srchandler, const int dst
 void destroy_communicator(communicator *comm);
 
 template <typename fp8type>
-inline void reduce_fp8_in_bf16_out(void *input, void *output, float *scale, int num_inputs, int input_size,
-                            musaStream_t stream) {}
+void reduce_fp8_in_bf16_out(void *input, void *output, float *scale, int num_inputs, int input_size,
+                            musaStream_t stream);
 
-inline void reduce_bf16(void *input, void *output, int num_inputs, int input_size, musaStream_t stream) {}
+void reduce_bf16(void *input, void *output, int num_inputs, int input_size, musaStream_t stream);
 
 #endif  // TRANSFORMER_ENGINE_USERBUFFERS_H_

@@ -14,6 +14,7 @@ import operator
 from functools import partial, reduce
 
 import torch
+import torch_musa
 import torch.distributed as dist
 from torch.distributed.elastic.multiprocessing.errors import record
 
@@ -107,7 +108,7 @@ def _parse_args(argv=None, namespace=None):
         "--clock-speed",
         type=int,
         default=-1,
-        help="Set device clock speed to a fixed value via `nvidia-smi`.",
+        help="Set device clock speed to a fixed value via `mthreads-gmi`.",
     )
     parser.add_argument(
         "--std", type=float, default=0.023, help="Standard deviation for input and weight tensors."
@@ -132,8 +133,8 @@ def _parse_args(argv=None, namespace=None):
     parser.add_argument(
         "--bootstrap-backend",
         type=str.lower,
-        default="nccl",
-        choices=["gloo", "mpi", "nccl"],
+        default="mccl",
+        choices=["gloo", "mpi", "nccl", "mccl"],
         help=(
             "PyTorch distributed backend for host tensor collectives during comm+GEMM overlap "
             + "initialization."
@@ -144,6 +145,12 @@ def _parse_args(argv=None, namespace=None):
     )
     parser.add_argument(
         "-v", "--verbose", action="store_true", default=False, help="Verbose info messages."
+    )
+    parser.add_argument(
+        "--dtype", type=str, default="bf16", choices=("bf16", "fp16"), help="set input tensor type"
+    )
+    parser.add_argument(
+        "--use-ce", action="store_true", default=False, help="Use CE for comm"
     )
     opts = parser.parse_args(argv, namespace)
 
@@ -188,20 +195,20 @@ def _main(opts):
     else:
         raise RuntimeError(f"{__file__} must be launched with either `mpirun` or `torchrun`!")
     assert WORLD_SIZE == LOCAL_SIZE  # this test supports only 1 node
-    assert LOCAL_SIZE <= torch.cuda.device_count()
+    assert LOCAL_SIZE <= torch.musa.device_count()
 
     # Fix clock speed
-    torch.cuda.set_device(LOCAL_RANK)
+    torch.musa.set_device(LOCAL_RANK)
     if opts.clock_speed > 0:
         subprocess.run(
-            ["nvidia-smi", "-pm", "ENABLED", "-i", str(LOCAL_RANK)],
+            ["mthreads-gmi", "-pm", "ENABLED", "-i", str(LOCAL_RANK)],
             env=os.environ,
             check=False,
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
         )
         result = subprocess.run(
-            ["nvidia-smi", "-lgc", str(opts.clock_speed), "-i", str(LOCAL_RANK)],
+            ["mthreads-gmi", "-lgc", str(opts.clock_speed), "-i", str(LOCAL_RANK)],
             env=os.environ,
             check=False,
             stdout=subprocess.PIPE,
@@ -231,7 +238,7 @@ def _main(opts):
 
     # Initialize torch.distributed global process group and get TP group
     dist_init_kwargs = {
-        "backend": "nccl",
+        "backend": "mccl",
         "rank": WORLD_RANK,
         "world_size": WORLD_SIZE,
     }
@@ -251,15 +258,22 @@ def _main(opts):
             or opts.init_method.startswith("tcp://")
         )
         dist_init_kwargs["init_method"] = opts.init_method
-    if opts.bind_to_device or opts.bootstrap_backend == "nccl":
-        dist_init_kwargs["device_id"] = torch.device(f"cuda:{LOCAL_RANK}")
-    assert dist.is_nccl_available()
+    # if opts.bind_to_device or opts.bootstrap_backend == "mccl":
+    #     dist_init_kwargs["device_id"] = torch.device(f"musa:{LOCAL_RANK}")
+    assert dist.is_mccl_available()
+
+    # TODO(yuzhe.wu): the result of allgather handle is not correct in S5000,
+    # temporarily use this two environment variables to solve it
+    os.environ["MCCL_ALGOS"] = "1"
+    os.environ["MCCL_PROTOS"] = "2"
+    os.environ["MCCL_BUFFSIZE"] = "20971520"
+
     dist.init_process_group(**dist_init_kwargs)
-    tp_group = dist.new_group(backend="nccl")
+    tp_group = dist.new_group(backend="mccl")
     tp_rank = dist.get_rank(tp_group)
     tp_size = dist.get_world_size(tp_group)
     dist_print(
-        f"Initialized default NCCL process group with {tp_size} GPUs",
+        f"Initialized default MCCL process group with {tp_size} GPUs",
         src=0,
         section=True,
         info=True,
@@ -294,7 +308,8 @@ def _main(opts):
     hidden_size = opts.num_heads * opts.head_dim
     inp_shape = (opts.seq_length, opts.batch_size, hidden_size)
     outer_size = reduce(operator.mul, inp_shape[:-1], 1)
-    buffer_dtype = torch.bfloat16
+    # buffer_dtype = torch.bfloat16
+    buffer_dtype = torch_dtypes[opts.dtype]
     if opts.fp8 and not opts.bulk_overlap and opts.comm_type == tex.CommOverlapType.AG:
         buffer_dtype = torch.uint8
     ub_obj = (
@@ -315,7 +330,9 @@ def _main(opts):
             buffer_dtype,
             helper,
             tp_size,  # Tensor-parallel group size (may be different than LOCAL_SIZE)
+            num_splits=4,
             atomic_gemm=opts.atomic,
+            use_ce=opts.use_ce,
         )
     )
 
@@ -325,7 +342,7 @@ def _main(opts):
         ub_obj2 = (
             tex.CommOverlapP2P(
                 (outer_size, hidden_size),
-                torch.uint8 if opts.fp8_output else torch.bfloat16,
+                torch.uint8 if opts.fp8_output else buffer_dtype,
                 helper,
                 tp_size,  # Tensor-parallel group size (may be different than LOCAL_SIZE)
                 tex.CommOverlapType.RS,
@@ -335,10 +352,11 @@ def _main(opts):
             if opts.atomic_rs_p2p
             else tex.CommOverlap(
                 (outer_size, hidden_size),
-                torch.uint8 if opts.fp8_output else torch.bfloat16,
+                torch.uint8 if opts.fp8_output else buffer_dtype,
                 helper,
                 tp_size,  # Tensor-parallel group size (may be different than LOCAL_SIZE)
                 atomic_gemm=True,
+                use_ce=opts.use_ce,
             )
         )
 
@@ -372,34 +390,37 @@ def _main(opts):
 
     # Initialize distributed input tensor and GEMM kernels
     torch.manual_seed(opts.seed + tp_rank)
-    torch.cuda.manual_seed(opts.seed + tp_rank)
+    torch.musa.manual_seed(opts.seed + tp_rank)
     inp = torch.nn.init.normal_(
-        torch.empty(local_inp_shape, dtype=torch.bfloat16, device="cuda"),
+        torch.empty(local_inp_shape, dtype=buffer_dtype, device="musa"),
         mean=0.0,
         std=opts.std,
     )
     kernel_t = torch.nn.init.normal_(
-        torch.empty(local_kernel_t_shape, dtype=torch.bfloat16, device="cuda"),
+        torch.empty(local_kernel_t_shape, dtype=buffer_dtype, device="musa"),
         mean=0.0,
         std=opts.std,
     )
+    
+    # inp = torch.full(local_inp_shape, tp_rank + 1, dtype=buffer_dtype, device="musa")
+    # kernel_t = torch.full(local_kernel_t_shape, 1, dtype=buffer_dtype, device="musa")
     if ub_obj2 is not None:
         kernel2_t = torch.nn.init.normal_(
-            torch.empty(local_kernel2_t_shape, dtype=torch.bfloat16, device="cuda"),
+            torch.empty(local_kernel2_t_shape, dtype=buffer_dtype, device="musa"),
             mean=0.0,
             std=opts.std,
         )
 
     # Allocate cuBLAS workspace
     workspace_size = 3 * get_cublas_workspace_size_bytes()
-    workspace = torch.empty(workspace_size, dtype=torch.uint8, device="cuda")
+    workspace = torch.empty(workspace_size, dtype=torch.uint8, device="musa")
 
     # Gather global tensors and calculate reference result (need these first for Fp8 scales)
     if opts.bulk_overlap:
         ker_g = torch.transpose(kernel_t, 0, 1)
         inp_g = inp
         bulk_inp = torch.nn.init.normal_(
-            torch.empty(bulk_inp_shape, dtype=torch.bfloat16, device="cuda"),
+            torch.empty(bulk_inp_shape, dtype=buffer_dtype, device="musa"),
             mean=0.0,
             std=opts.std,
         )
@@ -451,8 +472,8 @@ def _main(opts):
         # Structure to maintain amax and scale/scale_inv information for the kernel and input
         num_gemms = 6 if ub_obj2 is not None else 3
         fp8_dtype = tex.DType.kFloat8E4M3
-        fp8_scales = torch.ones(num_gemms, dtype=torch.float, device="cuda")
-        fp8_amaxes = torch.zeros(num_gemms, dtype=torch.float, device="cuda")
+        fp8_scales = torch.ones(num_gemms, dtype=torch.float, device="musa")
+        fp8_amaxes = torch.zeros(num_gemms, dtype=torch.float, device="musa")
 
         # Compute initial amaxes and scales
         inp_amax = torch.max(torch.abs(inp_g))
@@ -546,7 +567,7 @@ def _main(opts):
             if opts.fp8 and opts.fp8_output:
                 ub_obj2.set_buffer_params(out_quantizer)
             rs_out2 = torch.empty(
-                (outer_size // tp_size, hidden_size), dtype=torch.bfloat16, device="cuda"
+                (outer_size // tp_size, hidden_size), dtype=buffer_dtype, device="musa"
             )
     else:
         if opts.bulk_overlap:
@@ -559,7 +580,7 @@ def _main(opts):
             ub_obj.set_buffer_params(out_quantizer)
         gemm_inp = inp_fp8 if opts.fp8 else inp
         rs_out = torch.empty(
-            (outer_size // tp_size, hidden_size), dtype=torch.bfloat16, device="cuda"
+            (outer_size // tp_size, hidden_size), dtype=buffer_dtype, device="musa"
         )
 
     # Wrap GEMM ops in condensed functions to make CUDA Graphs easier to use
@@ -568,7 +589,7 @@ def _main(opts):
             kernel_t_fp8,
             gemm_inp,
             workspace,
-            out_dtype=torch.float8_e4m3fn if opts.fp8_output else torch.bfloat16,
+            out_dtype=torch.float8_e4m3fn if opts.fp8_output else buffer_dtype,
             quantization_params=out_quantizer,
             use_split_accumulator=te.module.base._2X_ACC_FPROP,
             ub=ub_obj,
@@ -586,7 +607,7 @@ def _main(opts):
             kernel2_t_fp8,
             gemm2_inp,
             workspace,
-            out_dtype=torch.float8_e4m3fn if opts.fp8_output else torch.bfloat16,
+            out_dtype=torch.float8_e4m3fn if opts.fp8_output else buffer_dtype,
             quantization_params=out2_quantizer,
             use_split_accumulator=te.module.base._2X_ACC_FPROP,
             ub=ub_obj2,
@@ -599,33 +620,105 @@ def _main(opts):
             kernel_t,
             gemm_inp,
             workspace,
-            out_dtype=torch.bfloat16,
+            out_dtype=buffer_dtype,
             use_split_accumulator=te.module.base._2X_ACC_FPROP,
             ub=ub_obj,
             ub_type=opts.comm_type,
             extra_output=rs_out,
             bulk_overlap=opts.bulk_overlap,
         )
+    
+    def _no_overlap_gemm(only_gemm_start_events, only_gemm_end_events, i):
+        if opts.bulk_overlap:
+            if opts.comm_type == tex.CommOverlapType.AG:
+                ln_out_total, _ = te.distributed.gather_along_first_dim(bulk_inp, tp_group)
+                # print(f"bulk ag no overlap: batch_size={opts.batch_size}, seq_len={opts.seq_length}, num_heads={opts.num_heads}, head_size={opts.head_dim}, gemm_inp.shape={gemm_inp.shape}, kernel_t.shape={kernel_t.shape}, ln_out.shape={bulk_inp.shape}, ln_out_total.shape={ln_out_total.shape}")
+                only_gemm_start_events[i].record()
+                outputs, *_ = tex.general_gemm(
+                    kernel_t,
+                    gemm_inp,
+                    workspace,
+                    out_dtype=buffer_dtype,
+                    use_split_accumulator=te.module.base._2X_ACC_FPROP,
+                    ub=None,
+                    extra_output=None,
+                    bulk_overlap=opts.bulk_overlap,
+                )
+                only_gemm_end_events[i].record()
+                return outputs
+            else:
+                rs_dgrad, _ = te.distributed.reduce_scatter_along_first_dim(bulk_inp, tp_group)
+                # print(f"bulk rs no overlap: batch_size={opts.batch_size}, seq_len={opts.seq_length}, num_heads={opts.num_heads}, head_size={opts.head_dim}, gemm_inp.shape={gemm_inp.shape}, kernel_t.shape={kernel_t.shape}, dgrad.shape={bulk_inp.shape}, rs_dgrad.shape={rs_dgrad.shape}")
+                only_gemm_start_events[i].record()
+                outputs, *_ = tex.general_gemm(
+                    kernel_t,
+                    gemm_inp,
+                    workspace,
+                    out_dtype=buffer_dtype,
+                    use_split_accumulator=te.module.base._2X_ACC_FPROP,
+                    ub=None,
+                    extra_output=None,
+                    bulk_overlap=opts.bulk_overlap,
+                )
+                only_gemm_end_events[i].record()
+                return outputs
+        else:
+            if opts.comm_type == tex.CommOverlapType.AG:
+                ln_out_total, _ = te.distributed.gather_along_first_dim(inp, tp_group)
+                # print(f"ring_exchange ag no overlap: batch_size={opts.batch_size}, seq_len={opts.seq_length}, num_heads={opts.num_heads}, head_size={opts.head_dim}, gemm_inp.shape={gemm_inp.shape}, kernel_t.shape={kernel_t.shape}, ln_out.shape={inp.shape}, ln_out_total.shape={ln_out_total.shape}")
+                only_gemm_start_events[i].record()
+                outputs, *_ = tex.general_gemm(
+                    kernel_t,
+                    ln_out_total,
+                     workspace,
+                    out_dtype=buffer_dtype,
+                    use_split_accumulator=te.module.base._2X_ACC_FPROP,
+                    ub=None,
+                    extra_output=None,
+                    bulk_overlap=opts.bulk_overlap,
+                )
+                only_gemm_end_events[i].record()
+                return outputs
+            else:
+                only_gemm_start_events[i].record()
+                out, grad_bias, grad_gelu, extra_output = tex.general_gemm(
+                    kernel_t,
+                    gemm_inp,
+                     workspace,
+                    out_dtype=buffer_dtype,
+                    use_split_accumulator=te.module.base._2X_ACC_FPROP,
+                    ub=None,
+                    extra_output=None,
+                    bulk_overlap=opts.bulk_overlap,
+                )
+                only_gemm_end_events[i].record()
+                rs_out, _ = te.distributed.reduce_scatter_along_first_dim(out, tp_group)
+                # print(f"ring_exchange or pipline rs no overlap: batch_size={opts.batch_size}, seq_len={opts.seq_length}, num_heads={opts.num_heads}, head_size={opts.head_dim}, gemm_inp.shape={gemm_inp.shape}, kernel_t.shape={kernel_t.shape}, out.shape={out.shape}, rs_out.shape={rs_out.shape}")
+                return rs_out
 
     # Trigger GEMM
     total_iters = opts.warmup_iters + opts.timing_iters
-    start_events = [torch.cuda.Event(enable_timing=True) for _ in range(total_iters)]
-    end_events = [torch.cuda.Event(enable_timing=True) for _ in range(total_iters)]
-    torch.cuda.synchronize()
+    start_events = [torch.musa.Event(enable_timing=True) for _ in range(total_iters)]
+    end_events = [torch.musa.Event(enable_timing=True) for _ in range(total_iters)]
+    without_overlap_start_events = [torch.musa.Event(enable_timing=True) for _ in range(total_iters)]
+    without_overlap_end_events = [torch.musa.Event(enable_timing=True) for _ in range(total_iters)]
+    only_gemm_start_events = [torch.musa.Event(enable_timing=True) for _ in range(total_iters)]
+    only_gemm_end_events = [torch.musa.Event(enable_timing=True) for _ in range(total_iters)]
+    torch.musa.synchronize()
 
     if opts.use_cuda_graphs:
         # Trace the CUDA graph first
-        g = torch.cuda.CUDAGraph()
+        g = torch.musa.MUSAGraph()
         if opts.fp8:
             if ub_obj is None:
-                with torch.cuda.graph(g):
+                with torch.musa.graph(g):
                     all_outputs = _fp8_gemm()
             else:
-                with torch.cuda.graph(g):
+                with torch.musa.graph(g):
                     all_outputs = _fp8_gemm()
                     _ = _fp8_gemm2(all_outputs[0])
         else:
-            with torch.cuda.graph(g):
+            with torch.musa.graph(g):
                 all_outputs = _gemm()
 
         # Now replay the CUDA graph in a loop
@@ -643,17 +736,52 @@ def _main(opts):
                 if ub_obj2 is not None:
                     _fp8_gemm2(all_outputs[0])
             else:
+                dist_print(f"start iter{i}", section=True, info=True, group=tp_group)
+                # FIXME: need to copy with each iter because the bulk_inp of userbuffer
+                # will be covered by the previous iter
+                if opts.bulk_overlap:
+                    if opts.comm_type == tex.CommOverlapType.AG:
+                        ub_obj.copy_into_buffer(bulk_inp, bulk_inp_quantizer, True)
+                    else:
+                        ub_obj.copy_into_buffer(bulk_inp_fp8 if opts.fp8 else bulk_inp, bulk_inp_quantizer, False)
+                torch.musa.synchronize()
                 start_events[i].record()
                 all_outputs = _gemm()
                 end_events[i].record()
+                
+                torch.musa.synchronize()
+                without_overlap_start_events[i].record()
+                without_overlap_all_outputs = _no_overlap_gemm(only_gemm_start_events, only_gemm_end_events, i)
+                without_overlap_end_events[i].record()
 
-    torch.cuda.synchronize()
+    torch.musa.synchronize()
     gpu_times = [
         s.elapsed_time(e)
         for s, e in zip(start_events[opts.warmup_iters :], end_events[opts.warmup_iters :])
     ]
+    
+    without_overlap_gpu_times = [
+        s.elapsed_time(e)
+        for s, e in zip(without_overlap_start_events[opts.warmup_iters :], without_overlap_end_events[opts.warmup_iters :])
+    ]
+
+    only_gemm_gpu_times = [
+        s.elapsed_time(e)
+        for s, e in zip(only_gemm_start_events[opts.warmup_iters :], only_gemm_end_events[opts.warmup_iters :])
+    ]
 
     avg_gpu_time = sum(gpu_times) / opts.timing_iters
+    without_overlap_avg_gpu_time = sum(without_overlap_gpu_times) / opts.timing_iters
+    only_gemm_avg_gpu_time = sum(only_gemm_gpu_times) / opts.timing_iters
+
+    toverlap = te.distributed.allreduce(torch.tensor(avg_gpu_time, device=inp.device), tp_group)[0].item() / tp_size
+    tnon_overlap = te.distributed.allreduce(torch.tensor(without_overlap_avg_gpu_time, device=inp.device), tp_group)[0].item() / tp_size
+    tgemm = te.distributed.allreduce(torch.tensor(only_gemm_avg_gpu_time, device=inp.device), tp_group)[0].item() / tp_size
+    tcomm = tnon_overlap - tgemm
+    pgemm = tgemm / tnon_overlap * 100
+    pcomm = tcomm / tnon_overlap * 100
+    scaling_factor = tnon_overlap / toverlap
+    rcomm_overlap = (tnon_overlap - toverlap) / tcomm * 100
     gemm_name = "".join(
         [
             "p2p all-gather + " if opts.comm_type == tex.CommOverlapType.AG else "",
@@ -670,12 +798,19 @@ def _main(opts):
         f"Avg. GPU time for {gemm_name}: {avg_gpu_time} ms "
         + f"({opts.warmup_iters} warmup + {opts.timing_iters} timing runs)"
     )
+    timing_info = (
+        f"individual GPU time for {gemm_name}: with overlap = {avg_gpu_time} ms (allreduced Toverlap = {toverlap} ms), "
+        + f"without_overlap = {without_overlap_avg_gpu_time} ms (allreduced Tnon-overlap = {tnon_overlap} ms), "
+        + f"Tgemm  = {tgemm} ms, Pgemm = {pgemm}%, Tcomm = {tcomm} ms, Pcomm = {pcomm}%, "
+        + f"scaling_factor X = {scaling_factor}x, Rcomm-overlap = {rcomm_overlap}% "
+        + f"({opts.warmup_iters} warmup + {opts.timing_iters} timing runs)"
+    )
     dist_print(timing_info, section=True, info=True, group=tp_group)
 
     # Compare against standard GEMM
     numerics_failed = False
     if opts.check_numerics:
-        torch.cuda.synchronize()
+        torch.musa.synchronize()
         dist.barrier(tp_group)
         if opts.bulk_overlap:
             output_info = ""
@@ -749,7 +884,7 @@ def _main(opts):
             )
             dist_print(sizing_info_g, src=0, group=tp_group)
 
-        torch.cuda.synchronize()
+        torch.musa.synchronize()
         dist.barrier(tp_group)
         diff = torch.abs(test_out - ref_out).flatten()
         m = torch.argmax(diff)
@@ -788,14 +923,14 @@ def _main(opts):
     # Reset clock speeds
     if opts.clock_speed > 0:
         subprocess.run(
-            ["nvidia-smi", "-pm", "ENABLED", "-i", str(LOCAL_RANK)],
+            ["mthreads-gmi", "-pm", "ENABLED", "-i", str(LOCAL_RANK)],
             env=os.environ,
             check=False,
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
         )
         result = subprocess.run(
-            ["nvidia-smi", "-rgc", "-i", str(LOCAL_RANK)],
+            ["mthreads-gmi", "-rgc", "-i", str(LOCAL_RANK)],
             env=os.environ,
             check=False,
             stdout=subprocess.DEVNULL,

@@ -18,6 +18,7 @@ string(APPEND MUSA_MCC_FLAGS " --offload-arch=mp_${MUSA_ARCH}")
 set(MUSA_VERBOSE_BUILD ON)
 set(MUSA_LINK_LIBRARIES_KEYWORD PUBLIC)
 
+string(APPEND MUSA_MCC_FLAGS " -g")
 if (CMAKE_BUILD_TYPE STREQUAL "Debug")
   string(APPEND MUSA_MCC_FLAGS " -g")
 endif()
@@ -62,6 +63,9 @@ set_property(TARGET torch_musa_python APPEND PROPERTY
 set_property(TARGET torch_musa_python APPEND PROPERTY
   INTERFACE_INCLUDE_DIRECTORIES "${TORCH_MUSA_PYTHONPATH}/share/generated_cuda_compatible/include"
 )
+set_property(TARGET torch_musa_python APPEND PROPERTY
+  INTERFACE_INCLUDE_DIRECTORIES "${TORCH_MUSA_PYTHONPATH}/share/generated_cuda_compatible/include/torch/csrc/api/include"
+)
 list(APPEND DEPENDENT_TARGETS torch_musa_python)
 
 execute_process(
@@ -90,7 +94,7 @@ list(APPEND transformer_engine_SOURCES
   comm_gemm_overlap/comm_gemm_overlap.cpp
   comm_gemm_overlap/userbuffers/ipcsocket.cc
   comm_gemm_overlap/userbuffers/userbuffers-host.cpp
-  # comm_gemm_overlap/userbuffers/userbuffers.mu
+  comm_gemm_overlap/userbuffers/userbuffers.mu
   fused_attn/fused_attn.cpp
   fused_attn/thd_utils.mu
   fused_rope/fused_rope.mu

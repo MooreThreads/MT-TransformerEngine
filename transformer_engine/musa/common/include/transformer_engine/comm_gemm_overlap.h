@@ -64,7 +64,7 @@ class CommOverlapCore {
   bool _ubuf_scale_inv_initialized{false};
 
   std::vector<musaStream_t> _stream_compute;
-  std::vector<at::musa::MUSAStream> _stream_comm_ce;
+  std::vector<musaStream_t> _stream_comm_ce;
   musaEvent_t _start_compute, _stop_compute, _start_comm, _stop_comm, _comm_launch_event;
 
  public:
@@ -151,7 +151,7 @@ class CommOverlapBase : public CommOverlapCore {
                   ExtAllgatherOp allgather_handle, ExtBarrierOp barrier_handle, int num_splits = 3,
                   int num_max_streams = NVTE_COMM_OVERLAP_MAX_STREAMS, int comm_cga_size = 2,
                   int gemm_priority = 0, int comm_priority = 0, int num_comm_sm = 16,
-                  bool set_sm_margin = true, bool atomic_gemm = false,
+                  bool set_sm_margin = true, bool atomic_gemm = false, bool use_ce = false,
                   bool rs_overlap_first_gemm = false);
 
   virtual ~CommOverlapBase();

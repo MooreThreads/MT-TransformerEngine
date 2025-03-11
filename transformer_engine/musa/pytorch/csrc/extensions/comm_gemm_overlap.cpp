@@ -148,14 +148,14 @@ CommOverlap::CommOverlap(const std::vector<size_t> &buffer_shape, at::ScalarType
                          CommOverlapHelper *helper, int tp_size, int num_splits,
                          int num_max_streams, int comm_cga_size, int gemm_priority,
                          int comm_priority, int num_comm_sm, bool set_sm_margin, bool atomic_gemm,
-                         bool rs_overlap_first_gemm)
+                         bool use_ce, bool rs_overlap_first_gemm)
     : te::CommOverlapBase(buffer_shape, te::pytorch::GetTransformerEngineDType(buffer_dtype),
                           helper->myrank, helper->numranks, helper->mylocal, helper->numlocal,
                           helper->mynode, helper->numnodes, tp_size,
                           std::bind(&CommOverlapHelper::ub_allgather, helper, _1, _2, _3, _4, _5),
                           std::bind(&CommOverlapHelper::ub_barrier, helper, _1), num_splits,
                           num_max_streams, comm_cga_size, gemm_priority, comm_priority, num_comm_sm,
-                          set_sm_margin, atomic_gemm, rs_overlap_first_gemm) {}
+                          set_sm_margin, atomic_gemm, use_ce, rs_overlap_first_gemm) {}
 
 void CommOverlap::set_buffer_params(py::handle quantizer) {
   std::unique_ptr<te::pytorch::Quantizer> my_quantizer = te::pytorch::convert_quantizer(quantizer);

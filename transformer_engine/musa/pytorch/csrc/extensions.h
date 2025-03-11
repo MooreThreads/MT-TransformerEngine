@@ -401,7 +401,7 @@ class CommOverlap : torch::CustomClassHolder, public transformer_engine::CommOve
               CommOverlapHelper *helper, int tp_size, int num_splits = 3,
               int num_max_streams = NVTE_COMM_OVERLAP_MAX_STREAMS, int comm_cga_size = 2,
               int gemm_priority = 0, int comm_priority = 0, int num_comm_sm = 16,
-              bool set_sm_margin = true, bool atomic_gemm = false,
+              bool set_sm_margin = true, bool atomic_gemm = false, bool use_ce = false,
               bool rs_overlap_first_gemm = false);
 
   ~CommOverlap() {}
