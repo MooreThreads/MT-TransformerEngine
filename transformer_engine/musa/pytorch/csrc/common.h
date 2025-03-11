@@ -153,8 +153,8 @@ class MXFP8Quantizer : public Quantizer {
 class MTFP8Quantizer : public Quantizer {
  public:
   DType dtype;
-  size_t block_m;
-  size_t block_n;
+  int64_t block_m;
+  int64_t block_n;
 
   explicit MTFP8Quantizer(const py::handle& quantizer);
 

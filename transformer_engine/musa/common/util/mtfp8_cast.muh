@@ -1,0 +1,95 @@
+#ifndef TRANSFORMER_ENGINE_MUSA_COMMON_UTIL_MTFP8_CAST_MUH_
+#define TRANSFORMER_ENGINE_MUSA_COMMON_UTIL_MTFP8_CAST_MUH_
+
+#include "mtfp8_groupwise_quantize.muh"
+
+namespace transformer_engine {
+
+namespace mtfp8 {
+
+template <typename Param, float (*OP)(float, const Param &)>
+inline void fp8_quantize_dispatch(
+    const Tensor* input,
+    const Tensor* noop,
+    Tensor* output,
+    Param param,
+    musaStream_t stream) {
+  NVTE_CHECK(noop->data.dtype == DType::kFloat32);
+  NVTE_CHECK(output->scale_inv.dtype == DType::kFloat32);
+  using CType = float;
+  TRANSFORMER_ENGINE_TYPE_SWITCH_NON_FP8ONLY(
+      input->data.dtype, IType,
+      TRANSFORMER_ENGINE_TYPE_SWITCH_FP8ONLY(
+          output->data.dtype, OType,
+        const auto M = input->flat_first_dim();
+        const auto N = input->flat_last_dim();
+        const auto sinv_m = output->scale_inv.shape[0];
+        const auto sinv_n = output->scale_inv.shape[1];
+        if (M == sinv_m) {
+          // 1*N or per-channel 
+          const size_t group_size = N / sinv_n;
+          fp8_groupwise_cast<Param, OP>(
+              reinterpret_cast<const IType*>(input->data.dptr),
+              reinterpret_cast<const CType*>(noop->data.dptr),
+              reinterpret_cast<OType*>(output->data.dptr),
+              reinterpret_cast<CType*>(output->scale_inv.dptr),
+              M, N, group_size, param, stream);
+        } else {
+        }
+      );
+  );
+}
+
+} // namespace mtfp8
+
+template <
+    bool IS_DBIAS,
+    bool IS_DACT,
+    bool IS_ACT,
+    typename Param,
+    float (*OP)(float, const Param &)>
+inline void mtfp8_quantize(
+    const Tensor* input,
+    const Tensor* act_input,
+    const Tensor* noop,
+    Tensor* output,
+    Tensor* dbias,
+    Tensor* workspace,
+    musaStream_t stream) {
+  using namespace mtfp8;
+  CheckNoopTensor(*noop, "cast_noop");
+  CheckInputTensor(*input, "cast_input");
+  CheckOutputTensor(*output, "cast_output");
+
+  if constexpr (IS_DBIAS) {
+    NVTE_CHECK(dbias != nullptr);
+    CheckOutputTensor(*dbias, "dbias");
+  }
+  if constexpr (IS_DACT) {
+    NVTE_CHECK(act_input != nullptr);
+    CheckInputTensor(*act_input, "activation_input");
+    NVTE_CHECK(input->dtype() == act_input->dtype(), "Types of both inputs must match.");
+    NVTE_CHECK(input->data.shape == act_input->data.shape, "Shapes of both inputs must match.");
+  }
+
+  NVTE_CHECK(!is_fp8_dtype(input->dtype()), "Input must be in higher precision.");
+  NVTE_CHECK(output->data.shape == input->data.shape, "Input and output shapes need to match.");
+
+  if (IS_DBIAS) {
+    NVTE_ERROR("Not yet implemented.");
+  }
+  if (IS_DACT) {
+    NVTE_ERROR("Not yet implemented.");
+  }
+
+  (void)workspace;
+  fp8_quantize_dispatch<Param, OP>(input, noop, output, {}, stream);
+}
+
+inline void mtfp8_dequantize(const Tensor &input, Tensor *output, musaStream_t stream) {
+  NVTE_CHECK(false, "mtfp8_dequantize not yet implememted.");
+}
+
+}  // namespace transformer_engine
+
+#endif // TRANSFORMER_ENGINE_MUSA_COMMON_UTIL_MTFP8_CAST_MUH_

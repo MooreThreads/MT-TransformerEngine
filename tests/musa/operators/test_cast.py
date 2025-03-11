@@ -9,9 +9,11 @@ from transformer_engine.pytorch.cpp_extensions import (
 )
 from transformer_engine.common.recipe import (
     DelayedScaling,
+    MTFP8BlockScaling,
 )
 from transformer_engine.pytorch.fp8 import (
     DelayedScalingRecipeState,
+    MTFP8BlockScalingRecipeState,
 )
 from transformer_engine.pytorch.tensor.float8_tensor import (
     Float8Tensor,
@@ -61,6 +63,13 @@ def create_per_tensor_recipe_state(scale, mode):
     state.scale = torch.tensor(
         [scale] * n_gemms, dtype=torch.float32, device=dev)
     return state
+
+
+def fp8_max(th_dtype):
+    assert th_dtype in [torch.float8_e5m2, torch.float8_e4m3fn]
+    if th_dtype == torch.float8_e5m2:
+        return 57344.0
+    return 448.0
 
 
 @pytest.mark.parametrize("shape", [
@@ -156,3 +165,69 @@ def test_legacy_cast_to_fp8_per_tensor():
     res_musa = to_cpu_cast(te_tensor._data.view(th_dtype), torch.float)
 
     assert torch.equal(res_cpu, res_musa)
+
+
+def create_mtfp8_groupwise_recipe_state(mode, group_size):
+    if mode == "forward":
+        n_gemms = 3
+    else:
+        n_gemms = 2
+    state = MTFP8BlockScalingRecipeState(
+        MTFP8BlockScaling(
+            activation_block_m=1,
+            activation_block_n=group_size,
+        ),
+        mode=mode,
+        num_quantizers=n_gemms,
+        device=torch.device(dev),
+    )
+    return state
+
+
+def composite_groupwise_cast(src, group_size, dst_dtype):
+    fp_max = fp8_max(dst_dtype)
+    cols = src.size(-1)
+    temp = src.reshape(-1, cols).float()
+
+    temp = temp.reshape(-1, group_size)
+    amax = torch.abs(temp).max(-1, keepdim=True)[0]
+    scale = fp_max / amax
+
+    dst = (temp * scale).to(dst_dtype).reshape(-1, cols)
+    sinv = (amax / fp_max).reshape(-1, cols // group_size)
+    return dst, sinv
+
+
+@pytest.mark.parametrize("shape", [
+    # align
+    [[768, 1024], 128],
+    [[256, 65536], 128],
+    [[2048, 2048], 128],
+    # unalign
+    [[768, 640], 128],
+    [[256, 65664], 128],
+    [[2048, 2176], 128],
+])
+@pytest.mark.parametrize("src_dtype", [
+    torch.bfloat16,
+])
+@pytest.mark.parametrize("dst_dtype", [
+    torch.float8_e4m3fn,
+    torch.float8_e5m2,
+])
+def test_mtfp8_groupwise_cast_to_fp8(shape, src_dtype, dst_dtype):
+    shape, group_size = shape
+    rs = create_mtfp8_groupwise_recipe_state(mode_from_th_dtype(dst_dtype), group_size)
+    quantizer = rs.make_quantizers()[0]
+   
+    musa_src = torch.randn(shape, dtype = src_dtype, device = dev)
+
+    gold_t, gold_sinv = composite_groupwise_cast(musa_src, group_size, dst_dtype)
+    gold_t = gold_t.float()
+
+    musa_dst = quantizer(musa_src)
+    dst_sinv = musa_dst._rowwise_scale_inv
+    dst_t = musa_dst._rowwise_data.view(dst_dtype).float()
+
+    assert torch.equal(gold_sinv, dst_sinv)
+    assert torch.equal(gold_t, dst_t)

@@ -27,7 +27,7 @@
 // #include "ptx.cuh"
 #include "transformer_engine/activation.h"
 #include "transformer_engine/transpose.h"
-#include "mtfp8_cast_kernels.muh"
+#include "mtfp8_cast.muh"
 
 namespace transformer_engine {
 

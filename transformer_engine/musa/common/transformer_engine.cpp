@@ -108,7 +108,16 @@ void CheckScaleTensorShape(const Tensor &t, const std::string &name) {
                    t.columnwise_scale_inv.shape, ")");
       }
     } else if (is_mtfp_scaling(t.scaling_mode)) {
-      NVTE_CHECK("Not yet implemented.");
+      NVTE_CHECK(t.has_data() && (!t.has_columnwise_data()));
+      NVTE_CHECK(t.amax.dptr == nullptr && t.scale.dptr == nullptr);
+      NVTE_CHECK(t.scale_inv.shape.size() == 2);
+      NVTE_CHECK(t.flat_first_dim() % t.scale_inv.shape[0] == 0);
+      NVTE_CHECK(t.flat_last_dim() % t.scale_inv.shape[1] == 0);
+      if (t.columnwise_scale_inv.dptr != nullptr) {
+        NVTE_CHECK(t.columnwise_scale_inv.shape.size() == 2);
+        NVTE_CHECK(t.flat_first_dim() % t.columnwise_scale_inv.shape[0] == 0);
+        NVTE_CHECK(t.flat_last_dim() % t.columnwise_scale_inv.shape[1] == 0);
+      }
     }
   }
 }

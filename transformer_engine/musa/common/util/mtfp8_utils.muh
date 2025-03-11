@@ -1,0 +1,24 @@
+#ifndef TRANSFORMER_ENGINE_MUSA_COMMON_UTIL_MTFP8_UTILS_MUH_
+#define TRANSFORMER_ENGINE_MUSA_COMMON_UTIL_MTFP8_UTILS_MUH_
+
+#include "musa_driver.h"
+#include "musa_runtime.h"
+
+namespace transformer_engine::mtfp8 {
+
+inline constexpr size_t io_bytes = 16;
+inline constexpr size_t wrap_size = 32;
+inline constexpr size_t max_threads_per_block = 1024;
+inline constexpr size_t max_wraps_per_block = max_threads_per_block / wrap_size;
+
+inline bool is_power_of_2(size_t n) {
+  return (n > 0) && (n & (n - 1)) == 0;
+}
+
+inline size_t ceil_div(size_t a, size_t b) {
+  return (a + b - 1) / b;
+}
+
+} // namespace transformer_engine::mtfp8
+
+#endif // TRANSFORMER_ENGINE_MUSA_COMMON_UTIL_MTFP8_UTILS_MUH_

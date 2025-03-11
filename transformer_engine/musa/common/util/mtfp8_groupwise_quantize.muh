@@ -1,0 +1,501 @@
+#ifndef TRANSFORMER_ENGINE_MUSA_COMMON_UTIL_MTFP8_GROUPWISE_QUANTIZE_MUH_
+#define TRANSFORMER_ENGINE_MUSA_COMMON_UTIL_MTFP8_GROUPWISE_QUANTIZE_MUH_
+
+#include "../common.h"
+#include "../utils.muh"
+#include "math.h"
+#include "mtfp8_utils.muh"
+
+#include "transformer_engine/transformer_engine.h"
+#include <iostream>
+namespace transformer_engine::mtfp8 {
+
+/*
+template <typename Param, float (*OP)(float, const Param &),
+          typename IType, typename CType, size_t VLEN,
+          size_t Rounds, bool AlignTail>
+inline __device__ void fp8_load_trans_max(
+    const IType* start,
+    const IType* end,
+    size_t stride,
+    Vec<CType, VLEN> vec_trans[Rounds],
+    Param param,
+    CType& amax) {
+  constexpr size_t AlignRounds = AlignTail ? Rounds : Rounds - 1;
+  Vec<IType, VLEN> vec_in;
+
+#pragma unroll
+  for (size_t i = 0; i < AlignRounds; ++i) {
+    vec_in.load_from(start, 0);
+#pragma unroll
+    for (size_t j = 0; j < VLEN; ++j) {
+      vec_trans[i].data.elt[j] = (CType)(OP((float)vec_in.data.elt[j], param));
+      __builtin_assume(amax >= 0);
+      amax = fmaxf(fabsf(vec_trans[i].data.elt[j]), amax);
+    }
+    start += stride;
+  }
+
+  if constexpr (!AlignTail) {
+#pragma unroll
+    for (size_t j = 0; j < VLEN; ++j) {
+      if (start < end) {
+        vec_trans[AlignRounds].data.elt[j] = (CType)(OP((float)(*start), param));
+        __builtin_assume(amax >= 0);
+        amax = fmaxf(fabsf(vec_trans[AlignRounds].data.elt[j]), amax);
+        ++start;
+      }
+    }
+  }
+}
+
+template <typename OType, typename CType, size_t VLEN,
+          size_t Rounds, bool AlignTail>
+inline __device__ void fp8_cast_store(
+    OType* start,
+    OType* end,
+    size_t stride,
+    Vec<CType, VLEN> vec_trans[Rounds],
+    CType scale) {
+  constexpr size_t AlignRounds = AlignTail ? Rounds : Rounds - 1;
+  Vec<OType, VLEN> vec_out;
+
+#pragma unroll
+  for (size_t i = 0; i < AlignRounds; ++i) {
+#pragma unroll
+    for (size_t j = 0; j < VLEN; ++j) {
+      vec_out.data.elt[j] = (OType)(vec_trans[i].data.elt[j] * scale);
+    }
+    vec_out.store_to(start, 0);
+    start += stride;
+  }
+
+  if constexpr (!AlignTail) {
+#pragma unroll
+    for (size_t j = 0; j < VLEN; ++j) {
+      if (start < end) {
+        *start = (OType)(vec_trans[AlignRounds].data.elt[j] * scale);
+        ++start;
+      }
+    }
+  }
+}
+
+template <
+    typename Param,
+    float (*OP)(float, const Param &),
+    typename IType,
+    typename OType,
+    typename CType,
+    size_t VLEN,
+    size_t AlignRounds,
+    bool AlignTail>
+__global__ void fp8_groupwise_1_to_1_kernel(
+    const IType* inp,
+    const CType* noop,
+    OType* out,
+    CType* sinv,
+    size_t group_size,
+    Param param) {
+  if (noop != nullptr && noop[0] == 1.0f) return;
+  using CVecT = Vec<CType, VLEN>;
+
+  constexpr size_t Rounds = AlignTail ? AlignRounds : AlignRounds + 1;
+  CVecT temp[Rounds];
+  CType amax = 0;
+
+  const size_t tid = threadIdx.x;
+  const size_t group_id = blockIdx.x;
+  const size_t lane_id = tid % wrap_size;
+
+  const size_t offset = group_size * group_id;
+  const size_t sub_offset = lane_id * VLEN;
+  const size_t stride = wrap_size * VLEN;
+
+  const IType* in_addr = inp + offset;
+  OType* out_addr = out + offset;
+  CType* sinv_addr = sinv + group_id;
+
+  fp8_load_trans_max<Param, OP, IType, CType, VLEN, Rounds, AlignTail>(
+      in_addr + sub_offset, in_addr + group_size, stride, temp, param, amax);
+
+  amax = warp_reduce_max_broadcast(amax);
+
+  CType scale = (CType)(Quantized_Limits<OType>::max_norm) / amax;
+  fp8_cast_store<OType, CType, VLEN, Rounds, AlignTail>(
+      out_addr + sub_offset, out_addr + group_size, stride, temp, scale);
+
+  if (lane_id == 0) {
+    *sinv_addr = amax * (CType)(Quantized_Limits<OType>::max_norm_rcp);
+  }
+}
+
+template <
+    typename Param,
+    float (*OP)(float, const Param &),
+    typename IType,
+    typename OType,
+    typename CType,
+    size_t VLEN,
+    size_t AlignRounds,
+    bool AlignTail>
+__global__ void fp8_groupwise_n_to_1_kernel(
+    const IType* inp,
+    const CType* noop,
+    OType* out,
+    CType* sinv,
+    size_t group_size,
+    Param param) {
+  if (noop != nullptr && noop[0] == 1.0f) return;
+  using CVecT = Vec<CType, VLEN>;
+
+  const size_t tid = threadIdx.x;
+  const size_t group_id = blockIdx.x;
+
+  const size_t offset = group_size * group_id;
+  const size_t sub_offset = tid * VLEN;
+
+  const int wrap_id = tid / (int)wrap_size;
+  const int n_wraps = blockDim.x / wrap_size;
+  const size_t stride = blockDim.x * VLEN;
+
+  constexpr size_t Rounds = AlignTail ? AlignRounds : AlignRounds + 1;
+  CVecT temp[Rounds];
+  CType amax = 0;
+  __shared__ CType block_amax;
+
+  const IType* in_addr = inp + offset;
+  OType* out_addr = out + offset;
+  CType* sinv_addr = sinv + group_id;
+
+  fp8_load_trans_max<Param, OP, IType, CType, VLEN, Rounds, AlignTail>(
+      in_addr + sub_offset, in_addr + group_size, stride, temp, param, amax);
+
+  __shared__ float staging[max_wraps_per_block];
+  amax = warp_reduce_max<wrap_size>(amax);
+  if (tid % (int)wrap_size == 0) {
+    staging[wrap_id] = amax;
+  }
+  __syncthreads_lm();
+
+  amax = 0;
+  if (wrap_id == 0) {
+    amax = tid < n_wraps ? staging[tid] : 0;
+    amax = warp_reduce_max<wrap_size>(amax);
+  }
+  if (tid == 0) {
+    block_amax = amax;
+  }
+  __syncthreads_lm();
+
+  CType scale = (CType)(Quantized_Limits<OType>::max_norm) / block_amax;
+  fp8_cast_store<OType, CType, VLEN, Rounds, AlignTail>(
+      out_addr + sub_offset, out_addr + group_size, stride, temp, scale);
+
+  if (tid == 0) {
+    *sinv_addr = block_amax * (CType)(Quantized_Limits<OType>::max_norm_rcp);
+  }
+}
+*/
+
+template <
+    typename Param,
+    float (*OP)(float, const Param &),
+    typename IType,
+    typename OType,
+    typename CType,
+    size_t VLEN,
+    size_t Rounds>
+__global__ void fp8_groupwise_1_to_n_kernel_align(
+    const IType* inp,
+    const CType* noop,
+    OType* out,
+    CType* sinv,
+    size_t group_size,
+    size_t N,
+    Param param) {
+  if (noop != nullptr && noop[0] == 1.0f) return;
+  using IVecT = Vec<IType, VLEN>;
+  using CVecT = Vec<CType, VLEN>;
+  using OVecT = Vec<OType, VLEN>;
+
+  const size_t tid = threadIdx.x;
+  const size_t bidm = blockIdx.x;
+  const size_t bidn = blockIdx.y;
+  const size_t lane_id = tid % wrap_size;
+
+  constexpr size_t elems_per_wrap = wrap_size * VLEN;
+  const size_t offset = bidm * N + bidn * elems_per_wrap;
+  const size_t sub_offset = lane_id * VLEN;
+
+  const size_t groups_per_channel = N / group_size;
+  const size_t sinv_offset = bidm * groups_per_channel + bidn * Rounds;
+
+  CType amax[Rounds] = {0};
+  CVecT temp;
+
+  const IType* inp_addr = inp + offset;
+  OType* out_addr = out + offset;
+  CType* sinv_addr = sinv + sinv_offset;
+
+  IVecT vec_in;
+  vec_in.load_from(inp_addr, lane_id);
+#pragma unroll
+  for (size_t i = 0; i < VLEN; ++i) {
+    temp.data.elt[i] = (CType)(OP((float)vec_in.data.elt[i], param));
+    const size_t idx = (sub_offset + i) / group_size;
+    __builtin_assume(amax[idx] >= 0);
+    amax[idx] = fmaxf(fabsf(temp.data.elt[i]), amax[idx]);
+  }
+
+#pragma unroll
+  for (size_t i = 0; i < Rounds; ++i) {
+    amax[i] = warp_reduce_max_broadcast(amax[i]);
+  }
+
+  if (tid < Rounds) {
+    *(sinv_addr + tid) = amax[tid] * (CType)(Quantized_Limits<OType>::max_norm_rcp);
+  }
+
+#pragma unroll
+  for (size_t i = 0; i < Rounds; ++i) {
+    amax[i] = (CType)(Quantized_Limits<OType>::max_norm) / amax[i];
+  }
+
+  OVecT vec_out;
+#pragma unroll
+  for (size_t i = 0; i < VLEN; ++i) {
+    const size_t idx = (sub_offset + i) / group_size;
+    vec_out.data.elt[i] = (OType)(temp.data.elt[i] * amax[idx]);
+  }
+  vec_out.store_to(out_addr, lane_id);
+}
+
+template <
+    typename Param,
+    float (*OP)(float, const Param &),
+    typename IType,
+    typename OType,
+    typename CType,
+    size_t VLEN,
+    size_t Rounds>
+__global__ void fp8_groupwise_1_to_n_kernel_no_align(
+    const IType* inp,
+    const CType* noop,
+    OType* out,
+    CType* sinv,
+    size_t group_size,
+    size_t N,
+    Param param) {
+  if (noop != nullptr && noop[0] == 1.0f) return;
+  using IVecT = Vec<IType, VLEN>;
+  using CVecT = Vec<CType, VLEN>;
+  using OVecT = Vec<OType, VLEN>;
+
+  const size_t tid = threadIdx.x;
+  const size_t bidm = blockIdx.x;
+  const size_t bidn = blockIdx.y;
+  const size_t lane_id = tid % wrap_size;
+
+  constexpr size_t elems_per_wrap = wrap_size * VLEN;
+  const size_t offset = bidm * N + bidn * elems_per_wrap;
+  const size_t sub_offset = lane_id * VLEN;
+
+  const size_t groups_per_channel = N / group_size;
+  const size_t sinv_offset = bidm * groups_per_channel + bidn * Rounds;
+
+  const IType* channel_end = inp + (bidm + 1) * N;
+  const IType* wrap_start = inp + offset;
+  const IType* wrap_end = std::min(wrap_start + elems_per_wrap, channel_end);
+  const size_t act_round = (wrap_end - wrap_start) / group_size;
+  assert(act_round >= 1 && act_round <= Rounds);
+
+  CType amax[Rounds] = {0};
+  CVecT temp;
+
+  const IType* inp_addr = std::min(wrap_start + sub_offset, wrap_end);
+  const IType* inp_end = std::min(inp_addr + VLEN, wrap_end); 
+  const size_t len = (inp_end - inp_addr);
+  assert(len == 0 || len == VLEN);
+  const bool is_empty = (len == 0);
+
+  if (!is_empty) {
+    IVecT vec_in;
+    vec_in.load_from(inp_addr, 0);
+
+#pragma unroll
+    for (size_t i = 0; i < VLEN; ++i) {
+      temp.data.elt[i] = (CType)(OP((float)vec_in.data.elt[i], param));
+      const size_t idx = (sub_offset + i) / group_size;
+      __builtin_assume(amax[idx] >= 0);
+      amax[idx] = fmaxf(fabsf(temp.data.elt[i]), amax[idx]);
+    }
+  }
+
+  for (size_t i = 0; i < act_round; ++i) {
+    amax[i] = warp_reduce_max_broadcast(amax[i]);
+  }
+
+  if (is_empty) {
+    return;
+  }
+
+  OType* out_addr = out + offset;
+  CType* sinv_addr = sinv + sinv_offset;
+
+  if (tid < act_round) {
+    *(sinv_addr + tid) = amax[tid] * (CType)(Quantized_Limits<OType>::max_norm_rcp);
+  }
+
+  for (size_t i = 0; i < act_round; ++i) {
+    amax[i] = (CType)(Quantized_Limits<OType>::max_norm) / amax[i];
+  }
+
+  OVecT vec_out;
+#pragma unroll
+  for (size_t i = 0; i < VLEN; ++i) {
+    const size_t idx = (sub_offset + i) / group_size;
+    vec_out.data.elt[i] = (OType)(temp.data.elt[i] * amax[idx]);
+  }
+  vec_out.store_to(out_addr, lane_id);
+}
+
+template <
+    typename Param,
+    float (*OP)(float, const Param &),
+    typename IType,
+    typename OType,
+    typename CType>
+inline void fp8_groupwise_cast(
+    const IType* inp,
+    const CType* noop,
+    OType* out,
+    CType* sinv,
+    size_t M,
+    size_t N,
+    size_t group_size,
+    Param param,
+    musaStream_t stream) {
+  constexpr size_t VLEN = io_bytes / sizeof(IType);
+  constexpr size_t elems_per_wrap = VLEN * wrap_size;
+  const size_t groups_per_channel = N / group_size;
+  const size_t groups = M * groups_per_channel;
+
+  if (elems_per_wrap <= group_size) {
+/*
+    size_t rounds = group_size / elems_per_wrap;
+    bool aligned = (group_size % elems_per_wrap == 0);
+    const int nr_blocks = (int)groups;
+    int block_size = (int)wrap_size;
+
+#define DISPATCH_1_TO_1(B, T, R, C)                                               \
+    if (C) {                                                                      \
+      fp8_groupwise_1_to_1_kernel<Param, OP, IType, OType, CType, VLEN, R, true>  \
+          <<<B, T, 0, stream>>>(inp, noop, out, sinv, group_size, param);         \
+    } else {                                                                      \
+      fp8_groupwise_1_to_1_kernel<Param, OP, IType, OType, CType, VLEN, R, false> \
+          <<<B, T, 0, stream>>>(inp, noop, out, sinv, group_size, param);         \
+    }
+
+    if (rounds == 1) {
+      DISPATCH_1_TO_1(nr_blocks, block_size, 1, aligned);
+      return;
+    }
+    if (rounds == 2 && aligned) {
+      DISPATCH_1_TO_1(nr_blocks, block_size, 2, true);
+      return;
+    }
+#undef DISPATCH_1_TO_1
+
+    const size_t expect_wraps = rounds + (aligned ? 0 : 1);
+    if (expect_wraps < max_wraps_per_block) {
+      block_size = (int)(expect_wraps * wrap_size);
+      if (group_size % elems_per_wrap == 0) {
+        rounds = 1;
+        aligned = true;
+      } else {
+        rounds = 0;
+        aligned = false;
+      }
+    } else {
+      block_size = (int)max_threads_per_block;
+      rounds = expect_wraps / max_wraps_per_block;
+      aligned = (expect_wraps % max_wraps_per_block == 0);
+    }
+
+#define DISPATCH_N_TO_1(B, T, R, C)                                               \
+    if (C) {                                                                      \
+      fp8_groupwise_n_to_1_kernel<Param, OP, IType, OType, CType, VLEN, R, true>  \
+          <<<B, T, 0, stream>>>(inp, noop, out, sinv, group_size, param);         \
+    } else {                                                                      \
+      fp8_groupwise_n_to_1_kernel<Param, OP, IType, OType, CType, VLEN, R, false> \
+          <<<B, T, 0, stream>>>(inp, noop, out, sinv, group_size, param);         \
+    }
+
+    if (rounds == 0) {
+      fp8_groupwise_n_to_1_kernel<Param, OP, IType, OType, CType, VLEN, 0, false>
+          <<<nr_blocks, block_size, 0, stream>>>(
+              inp, noop, out, sinv, group_size, param);
+      return;
+    }
+    if (rounds == 1) {
+      DISPATCH_N_TO_1(nr_blocks, block_size, 1, aligned);
+      return;
+    }
+    if (rounds == 2 && aligned) {
+      DISPATCH_N_TO_1(nr_blocks, block_size, 2, true);
+      return;
+    }
+#undef DISPATCH_N_TO_1
+*/
+    NVTE_ERROR("Not supported [1, ", group_size, "] blocksize for mtfp8 groupwise quantize.");
+  } else {
+    if (elems_per_wrap % group_size != 0) {
+      NVTE_ERROR("Not supported [1, ", group_size, "] blocksize for mtfp8 groupwise quantize.");
+    }
+    const size_t groups_per_wrap = elems_per_wrap / group_size;
+    const int wraps_per_channel = (int)ceil_div(groups_per_channel, groups_per_wrap);
+    const bool aligned = groups_per_channel % groups_per_wrap == 0;
+
+    dim3 blocks((int)M, wraps_per_channel);
+    dim3 threads(32);
+
+#define DISPATCH_1_TO_N(B, T, R, C)                                                 \
+    if (C) {                                                                        \
+      fp8_groupwise_1_to_n_kernel_align<Param, OP, IType, OType, CType, VLEN, R>    \
+          <<<B, T, 0, stream>>>(inp, noop, out, sinv, group_size, N, param);        \
+    } else {                                                                        \
+      fp8_groupwise_1_to_n_kernel_no_align<Param, OP, IType, OType, CType, VLEN, R> \
+          <<<B, T, 0, stream>>>(inp, noop, out, sinv, group_size, N, param);        \ 
+    }
+
+    switch (groups_per_wrap) {
+      case 1: {
+        DISPATCH_1_TO_N(blocks, threads, 1, aligned);
+        return;
+      }
+      case 2: {
+        DISPATCH_1_TO_N(blocks, threads, 2, aligned);
+        return;
+      }
+      case 4: {
+        DISPATCH_1_TO_N(blocks, threads, 4, aligned);
+        return;
+      }
+      case 8: {
+        DISPATCH_1_TO_N(blocks, threads, 8, aligned);
+        return;
+      }
+      default: {
+        break;
+      }
+    }
+#undef DISPATCH_1_TO_N
+
+    NVTE_CHECK(false, "Not yet implemented.");
+  }
+}
+
+} // namespace transformer_engine::mtfp8
+
+#endif // TRANSFORMER_ENGINE_MUSA_COMMON_UTIL_MTFP8_GROUPWISE_QUANTIZE_MUH_

@@ -226,15 +226,104 @@ std::pair<TensorWrapper, py::object> MXFP8Quantizer::create_tensor(
 }
 
 MTFP8Quantizer::MTFP8Quantizer(const py::handle& quantizer) : Quantizer(quantizer) {
+  dtype = quantizer.attr("dtype").cast<DType>();
+  block_m = quantizer.attr("block_m").cast<int64_t>();
+  block_n = quantizer.attr("block_n").cast<int64_t>();
+
+  NVTE_CHECK(block_m > 0);
+  if (block_m == 1) {
+    NVTE_CHECK((block_n == -1) || (block_n > 0 && block_n % 16 == 0));
+  } else {
+    NVTE_CHECK((block_m % 16 == 0) && (block_m == block_n));
+  }
 }
 
 void MTFP8Quantizer::set_quantization_params(TensorWrapper* tensor) const {
+  auto rowwise_data = tensor->get_rowwise_data();
+  rowwise_data.dtype = static_cast<NVTEDType>(dtype);
+  tensor->set_rowwise_data(
+      rowwise_data.data_ptr, static_cast<DType>(rowwise_data.dtype), rowwise_data.shape);
 }
 
 std::pair<TensorWrapper, py::object> MTFP8Quantizer::create_tensor(
-    const std::vector<size_t>& shape, DType dtype, std::optional<at::Tensor> rowwise_data) const {
+    const std::vector<size_t>& shape, DType fake_dtype, std::optional<at::Tensor> rowwise_data) const {
+  using namespace pybind11::literals;
+  std::vector<int64_t> torch_shape;
+  int64_t numel = 1;
+  for (auto s : shape) {
+    torch_shape.emplace_back(static_cast<int64_t>(s));
+    numel *= static_cast<int64_t>(s);
+  }
+  const auto dim_n = torch_shape.back();
+  const auto dim_m = numel / dim_n;
+
   TensorWrapper tensor(NVTE_MTFP8_BLOCK_SCALING);
+  auto opt = at::TensorOptions().device(torch::kPrivateUse1);
+
+  at::Tensor data, rowwise_scale_inv, columnwise_scale_inv;
+  if (rowwise_usage) {
+    if (rowwise_data.has_value()) {
+      data = std::move(*rowwise_data);
+    } else {
+      data = at::empty(torch_shape, opt.dtype(torch::kUInt8));
+    }
+    const auto rowwise_block_m = block_m;
+    const auto rowwise_block_n = block_n == -1 ? dim_n : block_n;
+
+    NVTE_CHECK(
+      (dim_m % rowwise_block_m == 0) && (dim_n % rowwise_block_n == 0),
+      "MTFP8 requires tensor rowwise flat dims that are divisble by [",
+      rowwise_block_m, ", ", rowwise_block_n, "], but got shape=[",
+      dim_m, ", ", dim_n, "].");
+
+    const auto sinv0 = dim_m / rowwise_block_m;
+    const auto sinv1 = dim_n / rowwise_block_n;
+
+    rowwise_scale_inv = at::zeros({sinv0, sinv1}, opt.dtype(torch::kFloat));
+    tensor.set_rowwise_data(data.data_ptr(), dtype, shape);
+    tensor.set_rowwise_scale_inv(rowwise_scale_inv.data_ptr(), DType::kFloat32,
+                                 std::vector<size_t>{static_cast<size_t>(sinv0), static_cast<size_t>(sinv1)});
+  }
+
+  const bool can_not_share = (block_m != block_n);
+  if (columnwise_usage && can_not_share) {
+    const auto colwise_block_m = block_n == -1 ? dim_m : block_n;
+    const auto colwise_block_n = block_m;
+
+    NVTE_CHECK(
+        (dim_m % colwise_block_m == 0) && (dim_n % colwise_block_n == 0),
+        "MTFP8 requires tensor colwise flat dims that are divisble by [",
+        colwise_block_m, ", ", colwise_block_n, "], but got shape=[",
+        dim_m, ", ", dim_n, "].");
+
+    const auto sinv0 = dim_m / colwise_block_m;
+    const auto sinv1 = dim_n / colwise_block_n;
+
+    columnwise_scale_inv = at::zeros({sinv0, sinv1}, opt.dtype(torch::kFloat));
+    tensor.set_columnwise_scale_inv(columnwise_scale_inv.data_ptr(), DType::kFloat32,
+                                    std::vector<size_t>{static_cast<size_t>(sinv0), static_cast<size_t>(sinv1)});
+  }
+  this->set_quantization_params(&tensor);
+
   py::object ret;
+  if (internal) {
+    py::handle MTFP8TensorClass(reinterpret_cast<PyObject*>(MTFP8TensorBasePythonClass));
+    ret = MTFP8TensorClass("rowwise_data"_a = data,
+                           "rowwise_scale_inv"_a = rowwise_scale_inv,
+                           "columnwise_scale_inv"_a = columnwise_scale_inv,
+                           "fp8_dtype"_a = dtype,
+                           "quantizer"_a = quantizer);
+  } else {
+    py::handle MTFP8TensorClass(reinterpret_cast<PyObject*>(MTFP8TensorPythonClass));
+    ret = MTFP8TensorClass("shape"_a = torch_shape,
+                           "dtype"_a = GetATenDType(fake_dtype),
+                           "rowwise_data"_a = data,
+                           "rowwise_scale_inv"_a = rowwise_scale_inv,
+                           "columnwise_scale_inv"_a = columnwise_scale_inv,
+                           "fp8_dtype"_a = dtype,
+                           "quantizer"_a = quantizer);
+  }
+
   return {std::move(tensor), std::move(ret)};
 }
 

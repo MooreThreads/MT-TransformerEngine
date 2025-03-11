@@ -25,7 +25,7 @@
 #include "math.h"
 // #include "ptx.cuh"
 #include "transformer_engine/transformer_engine.h"
-#include "mtfp8_cast_kernels.muh"
+#include "mtfp8_cast.muh"
 
 namespace transformer_engine {
 
@@ -1254,8 +1254,13 @@ void quantize_helper(const NVTETensor input, const NVTETensor grad, const NVTETe
           !(output_tensor->has_columnwise_data()),
           "MTFP8 quantization should not involve columnwise data.");
       NVTE_CHECK(output_tensor->has_data(), "Data should be provided for MTFP8 quantization.");
-      mtfp8_quantize<IS_DBIAS, IS_DACT, IS_ACT, ParamOP, OP>(
+      if (!is_fp8_dtype(output_tensor->dtype())) {
+        fp8_quantize<IS_DBIAS, IS_DACT, IS_ACT, ParamOP, OP>(
           *input_tensor, activation_input_tensor, &noop_tensor, output_tensor, dbias_tensor,
+          workspace_tensor, stream);
+      }
+      mtfp8_quantize<IS_DBIAS, IS_DACT, IS_ACT, ParamOP, OP>(
+          input_tensor, activation_input_tensor, &noop_tensor, output_tensor, dbias_tensor,
           workspace_tensor, stream);
       break;
     }

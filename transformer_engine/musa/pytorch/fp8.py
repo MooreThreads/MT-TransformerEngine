@@ -99,7 +99,7 @@ class MTFP8BlockScalingRecipeState(RecipeState):
 
     def make_quantizers(self) -> list:
         return [MTFP8Quantizer(
-            dtype=self.dtype,
+            self.dtype,
             **(self.blocks[i % self.num_quantizers]),
         ) for i in range(self.num_quantizers)]
 
