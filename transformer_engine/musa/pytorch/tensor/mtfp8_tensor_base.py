@@ -34,6 +34,7 @@ class _FromMTFP8Func(torch.autograd.Function):
 
 class MTFP8TensorBase:
     _rowwise_data: Optional[torch.Tensor]
+    _columnwise_data: Optional[torch.Tensor]
     _quantizer: Optional[Quantizer]
     _fp8_dtype: tex.DType
     _rowwise_scale_inv: torch.Tensor
@@ -44,6 +45,7 @@ class MTFP8TensorBase:
         *args,
         rowwise_data: Optional[torch.Tensor],
         rowwise_scale_inv: torch.Tensor,
+        columnwise_data: Optional[torch.Tensor],
         columnwise_scale_inv: torch.Tensor,
         fp8_dtype: tex.DType,
         quantizer: Optional[Quantizer] = None,
@@ -51,6 +53,7 @@ class MTFP8TensorBase:
     ):
         instance = super().__new__(cls, *args, **kwargs)
         instance._rowwise_data = rowwise_data
+        instance._columnwise_data = columnwise_data
         instance._rowwise_scale_inv = rowwise_scale_inv
         instance._columnwise_scale_inv = columnwise_scale_inv
         instance._fp8_dtype = fp8_dtype
@@ -62,23 +65,25 @@ class MTFP8TensorBase:
         return {
             "rowwise_data": self._rowwise_data,
             "rowwise_scale_inv": self._rowwise_scale_inv,
+            "columnwise_data": self._columnwise_data,
             "columnwise_scale_inv": self._columnwise_scale_inv,
             "fp8_dtype": self._fp8_dtype,
             "quantizer": self._quantizer,
         }
 
     def prepare_for_saving(self) -> Tuple[list[Optional[torch.Tensor]], MTFP8TensorBase]:
-        tensors = [self._rowwise_data]
+        tensors = [self._rowwise_data, self._columnwise_data]
         return tensors, self
 
     def restore_from_saved(
         self, tensors: list[Optional[torch.Tensor]]
     ) -> list[Optional[torch.Tensor]]:
         self._rowwise_data = tensors[0]
-        return tensors[1:] 
+        self._columnwise_data = tensors[1]
+        return tensors[2:]
 
     def get_data_tensors(self):
-        return (self._rowwise_data,)
+        return self._rowwise_data, self._columnwise_data
 
     def dequantize(self, *, dtype: torch.dtype = torch.float32) -> torch.Tensor:
         return _FromMTFP8Func.forward(None, self, dtype)

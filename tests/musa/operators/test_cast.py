@@ -219,6 +219,7 @@ def test_mtfp8_groupwise_cast_to_fp8(shape, src_dtype, dst_dtype):
     shape, group_size = shape
     rs = create_mtfp8_groupwise_recipe_state(mode_from_th_dtype(dst_dtype), group_size)
     quantizer = rs.make_quantizers()[0]
+    quantizer.columnwise_usage = False
    
     musa_src = torch.randn(shape, dtype = src_dtype, device = dev)
 
@@ -231,3 +232,20 @@ def test_mtfp8_groupwise_cast_to_fp8(shape, src_dtype, dst_dtype):
 
     assert torch.equal(gold_sinv, dst_sinv)
     assert torch.equal(gold_t, dst_t)
+
+
+@pytest.mark.parametrize("shape", [
+    [[768, 1024], 128],
+])
+@pytest.mark.parametrize("src_dtype", [
+    torch.bfloat16,
+])
+@pytest.mark.parametrize("dst_dtype", [
+    torch.float8_e4m3fn,
+])
+def test_mtfp8_groupwise_cast_transpose(shape, src_dtype, dst_dtype):
+    shape, group_size = shape
+    rs = create_mtfp8_groupwise_recipe_state(mode_from_th_dtype(dst_dtype), group_size)
+    quantizer = rs.make_quantizers()[0]
+    musa_src = torch.randn(shape, dtype = src_dtype, device = dev)
+    musa_dst = quantizer(musa_src)

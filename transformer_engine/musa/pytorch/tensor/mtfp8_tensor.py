@@ -79,25 +79,30 @@ class MTFP8Quantizer(Quantizer):
 
         assert (
             shape[-1] % self.block_n == 0
-            and math.prod(shape[:-1]) % self.block_m == 0
         ), (
             f"Incorrect shape {shape} for MTFP8. Tensor dims must be divisible by"
             f" [{self.block_m}, {self.block_n}]"
         )
 
+        def ceil_div(a, b):
+            return (a + b - 1) / b
+
         data = torch.empty(shape, dtype=torch.uint8, device=device)
         scale_inv = torch.zeros(
-            round_up_to_nearest_multiple(math.prod(shape[:-1]), self.block_m),
-            round_up_to_nearest_multiple(shape[-1], self.block_n),
-            dtype=torch.uint8,
+            ceil_div(math.prod(shape[:-1]), self.block_m),
+            ceil_div(shape[-1], self.block_n),
+            dtype=torch.float,
             device=device,
         )
 
+        columnwise_data = None
         columnwise_scale_inv = None
-        if self.columnwise_usage:
+        if self.columnwise_usage and self.block_m != self.block_n:
+            columnwise_data = torch.empty_like(data)
             columnwise_scale_inv = torch.zeros(
-                scale_inv.shape[::-1],
-                dtype=torch.uint8,
+                ceil_div(math.prod(shape[:-1]), self.block_n),
+                ceil_div(shape[-1], self.block_m),
+                dtype=torch.float,
                 device=device,
             )
 
@@ -106,6 +111,7 @@ class MTFP8Quantizer(Quantizer):
             dtype=dtype,
             rowwise_data=data,
             rowwise_scale_inv=scale_inv,
+            columnwise_data=columnwise_data,
             columnwise_scale_inv=columnwise_scale_inv,
             fp8_dtype=self.dtype,
             quantizer=self,
@@ -132,19 +138,23 @@ class MTFP8Tensor(MTFP8TensorBase, QuantizedTensor):
         if self._quantizer is not None:
             return self._quantizer
 
-        assert self._rowwise_data is not None
-        assert self._rowwise_scale_inv is not None
         rowwise_data_shape = self._rowwise_data.shape
         rowwise_scale_inv_shape = self._rowwise_scale_inv.shape
         assert len(rowwise_data_shape) == 2
         assert len(rowwise_scale_inv_shape) == 2
-        assert rowwise_data_shape[0] % rowwise_scale_inv_shape[0] == 0
+
         assert rowwise_data_shape[1] % rowwise_scale_inv_shape[1] == 0
+        block_n = rowwise_data_shape[1] // rowwise_scale_inv_shape[1]
+
+        if rowwise_data_shape[0] == rowwise_scale_inv_shape[0]:
+            block_m = 1
+        else:
+            block_m = block_n
 
         return MTFP8Quantizer(
             fp8_dtype=self._fp8_dtype,
-            block_m=(rowwise_data_shape[0] // rowwise_scale_inv_shape[0]),
-            block_n=(rowwise_data_shape[1] // rowwise_scale_inv_shape[1]),
+            block_m=block_m,
+            block_n=block_n,
         )
 
     def quantize_(
@@ -168,6 +178,7 @@ class MTFP8Tensor(MTFP8TensorBase, QuantizedTensor):
             assert (
                 self._rowwise_data is not None
                 and self._rowwise_scale_inv is not None
+                and self._columnwise_data is not None
                 and self._columnwise_scale_inv is not None
             ), "Cannot update to rowwise and columnwise usage."
             return
@@ -176,22 +187,28 @@ class MTFP8Tensor(MTFP8TensorBase, QuantizedTensor):
             assert (
                 self._rowwise_data is not None and self._rowwise_scale_inv is not None
             ), "Cannot update to rowwise usage."
+            self._columnwise_data = None
             self._columnwise_scale_inv = None
             return
 
         assert (
-            self._rowwise_data is not None and self._columnwise_scale_inv is not None
+            self._columnwise_data is not None and self._columnwise_scale_inv is not None
         ), "Cannot update to columnwise usage."
+        self._rowwise_data = None
         self._rowwise_scale_inv = None
         return
 
     def clone(self) -> MTFP8Tensor:
         assert self._rowwise_data is not None
         rowwise_data = self._rowwise_data.detach().clone()
+        columnwise_data = None
+        if self._columnwise_data is not None:
+            columnwise_data = self._columnwise_data.detach().clone()
         return _IdentityFunc.apply(
             self,
             {
                 "rowwise_data": rowwise_data,
+                "columnwise_data": columnwise_data,
             },
         )
 
@@ -209,10 +226,15 @@ class MTFP8Tensor(MTFP8TensorBase, QuantizedTensor):
             memory_format=memory_format
         ):
             return self
+        if self._columnwise_data is not None and self._columnwise_data.is_contiguous(
+            memory_format=memory_format
+        ):
+            return self
         raise ValueError("MTFP8Tensor does not support different memory formats!")
 
     def clear(self):
         self._rowwise_data = torch.Tensor() if self._rowwise_data is not None else None
+        self._columnwise_data = torch.Tensor() if self._columnwise_data is not None else None
 
     @classmethod
     def __torch_dispatch__(cls, func, types, args, kwargs=None):
@@ -232,6 +254,7 @@ class MTFP8Tensor(MTFP8TensorBase, QuantizedTensor):
                 dtype=tensor.dtype,
                 rowwise_data=out_data,
                 rowwise_scale_inv=tensor._rowwise_scale_inv,
+                columnwise_data=tensor._columnwise_data,
                 columnwise_scale_inv=tensor._columnwise_scale_inv,
                 fp8_dtype=tensor._fp8_dtype,
                 quantizer=tensor._quantizer,
@@ -245,6 +268,7 @@ class MTFP8Tensor(MTFP8TensorBase, QuantizedTensor):
         cls,
         rowwise_data: torch.Tensor,
         rowwise_scale_inv: torch.Tensor,
+        columnwise_data: torch.Tensor,
         columnwise_scale_inv: torch.Tensor,
         fp8_dtype: tex.DType,
         dtype: torch.dtype,
@@ -253,6 +277,7 @@ class MTFP8Tensor(MTFP8TensorBase, QuantizedTensor):
             dtype=dtype,
             rowwise_data=rowwise_data,
             rowwise_scale_inv=rowwise_scale_inv,
+            columnwise_data=columnwise_data,
             columnwise_scale_inv=columnwise_scale_inv,
             fp8_dtype=fp8_dtype,
         )
@@ -263,6 +288,7 @@ class MTFP8Tensor(MTFP8TensorBase, QuantizedTensor):
             (
                 self._rowwise_data,
                 self._rowwise_scale_inv,
+                self._columnwise_data,
                 self._columnwise_scale_inv,
                 self._fp8_dtype,
                 self.dtype,
@@ -297,6 +323,7 @@ class MTFP8Tensor(MTFP8TensorBase, QuantizedTensor):
                 )
                 super(MTFP8Tensor, type(self)).data.__set__(self, dummy_tensor)
             self._rowwise_data = tensor._rowwise_data
+            self._columnwise_data = tensor._columnwise_data
             self._quantizer = tensor._quantizer
             self._fp8_dtype = tensor._fp8_dtype
             self._rowwise_scale_inv = tensor._rowwise_scale_inv
@@ -340,14 +367,18 @@ class _ViewFunc(torch.autograd.Function):
             )
 
         new_rowwise_data = None
+        new_columnwise_data = None
         if tensor._rowwise_data is not None:
             new_rowwise_data = tensor._rowwise_data.view(*shape)
-
+        if tensor._columnwise_data is not None:
+            columnwise_shape = [shape[-1]] + list(shape[:-1])
+            new_columnwise_data = tensor._columnwise_data.view(columnwise_shape)
         return MTFP8Tensor(
             shape,
             tensor.dtype,
             rowwise_data=new_rowwise_data,
             rowwise_scale_inv=tensor._rowwise_scale_inv,
+            columnwise_data=new_columnwise_data,
             columnwise_scale_inv=tensor._columnwise_scale_inv,
             fp8_dtype=tensor._fp8_dtype,
             quantizer=tensor._quantizer,
@@ -362,11 +393,16 @@ class _ViewFunc(torch.autograd.Function):
             new_data = (
                 grad._rowwise_data.view(*ctx.shape) if grad._rowwise_data is not None else None
             )
+            if grad._columnwise_data is not None:
+                new_columnwise_data = grad._columnwise_data.view(ctx.shape[-1], -1)
+            else:
+                new_columnwise_data = None
             dgrad = MTFP8Tensor(
                 ctx.shape,
                 grad.dtype,
                 rowwise_data=new_data,
                 rowwise_scale_inv=grad._rowwise_scale_inv,
+                columnwise_data=new_columnwise_data,
                 columnwise_scale_inv=grad._columnwise_scale_inv,
                 fp8_dtype=grad._fp8_dtype,
                 quantizer=grad._quantizer,
@@ -404,14 +440,19 @@ class _ReshapeFunc(torch.autograd.Function):
             )
 
         new_rowwise_data = None
+        new_columnwise_data = None
         if tensor._rowwise_data is not None:
             new_rowwise_data = tensor._rowwise_data.reshape(*shape)
+        if tensor._columnwise_data is not None:
+            columnwise_shape = [shape[-1]] + list(shape[:-1])
+            new_columnwise_data = tensor._columnwise_data.view(columnwise_shape)
 
         return MTFP8Tensor(
             shape,
             tensor.dtype,
             rowwise_data=new_rowwise_data,
             rowwise_scale_inv=tensor._rowwise_scale_inv,
+            columnwise_data=new_columnwise_data,
             columnwise_scale_inv=tensor._columnwise_scale_inv,
             fp8_dtype=tensor._fp8_dtype,
             quantizer=tensor._quantizer,
@@ -424,13 +465,18 @@ class _ReshapeFunc(torch.autograd.Function):
     ) -> Tuple[Optional[torch.Tensor], ...]:
         if isinstance(grad, MTFP8Tensor):
             new_rowwise_data = None
+            new_columnwise_data = None
             if grad._rowwise_data is not None:
                 new_rowwise_data = grad._rowwise_data.view(*ctx.shape)
+            if grad._columnwise_data is not None:
+                columnwise_shape = [ctx.shape[-1]] + list(ctx.shape[:-1])
+                new_columnwise_data = grad._columnwise_data.view(columnwise_shape)
             dgrad = MTFP8Tensor(
                 ctx.shape,
                 grad.dtype,
                 rowwise_data=new_rowwise_data,
                 rowwise_scale_inv=grad._rowwise_scale_inv,
+                columnwise_data=new_columnwise_data,
                 columnwise_scale_inv=grad._columnwise_scale_inv,
                 fp8_dtype=grad._fp8_dtype,
                 quantizer=grad._quantizer,

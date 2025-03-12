@@ -232,7 +232,7 @@ MTFP8Quantizer::MTFP8Quantizer(const py::handle& quantizer) : Quantizer(quantize
 
   NVTE_CHECK(block_m > 0);
   if (block_m == 1) {
-    NVTE_CHECK((block_n == -1) || (block_n > 0 && block_n % 16 == 0));
+    NVTE_CHECK(block_n > 0 && block_n % 16 == 0);
   } else {
     NVTE_CHECK((block_m % 16 == 0) && (block_m == block_n));
   }
@@ -260,24 +260,17 @@ std::pair<TensorWrapper, py::object> MTFP8Quantizer::create_tensor(
   TensorWrapper tensor(NVTE_MTFP8_BLOCK_SCALING);
   auto opt = at::TensorOptions().device(torch::kPrivateUse1);
 
-  at::Tensor data, rowwise_scale_inv, columnwise_scale_inv;
+  at::Tensor data, rowwise_scale_inv;
+  at::Tensor columnwise_data, columnwise_scale_inv;
   if (rowwise_usage) {
     if (rowwise_data.has_value()) {
       data = std::move(*rowwise_data);
     } else {
       data = at::empty(torch_shape, opt.dtype(torch::kUInt8));
     }
-    const auto rowwise_block_m = block_m;
-    const auto rowwise_block_n = block_n == -1 ? dim_n : block_n;
 
-    NVTE_CHECK(
-      (dim_m % rowwise_block_m == 0) && (dim_n % rowwise_block_n == 0),
-      "MTFP8 requires tensor rowwise flat dims that are divisble by [",
-      rowwise_block_m, ", ", rowwise_block_n, "], but got shape=[",
-      dim_m, ", ", dim_n, "].");
-
-    const auto sinv0 = dim_m / rowwise_block_m;
-    const auto sinv1 = dim_n / rowwise_block_n;
+    const auto sinv0 = (dim_m + block_m - 1) / block_m;
+    const auto sinv1 = (dim_n + block_n - 1) / block_n;
 
     rowwise_scale_inv = at::zeros({sinv0, sinv1}, opt.dtype(torch::kFloat));
     tensor.set_rowwise_data(data.data_ptr(), dtype, shape);
@@ -287,19 +280,12 @@ std::pair<TensorWrapper, py::object> MTFP8Quantizer::create_tensor(
 
   const bool can_not_share = (block_m != block_n);
   if (columnwise_usage && can_not_share) {
-    const auto colwise_block_m = block_n == -1 ? dim_m : block_n;
-    const auto colwise_block_n = block_m;
+    const auto sinv0 = (dim_m + block_n - 1) / block_n;
+    const auto sinv1 = (dim_n + block_m - 1) / block_m;
 
-    NVTE_CHECK(
-        (dim_m % colwise_block_m == 0) && (dim_n % colwise_block_n == 0),
-        "MTFP8 requires tensor colwise flat dims that are divisble by [",
-        colwise_block_m, ", ", colwise_block_n, "], but got shape=[",
-        dim_m, ", ", dim_n, "].");
-
-    const auto sinv0 = dim_m / colwise_block_m;
-    const auto sinv1 = dim_n / colwise_block_n;
-
+    columnwise_data = at::empty(torch_shape, opt.dtype(torch::kUInt8));
     columnwise_scale_inv = at::zeros({sinv0, sinv1}, opt.dtype(torch::kFloat));
+    tensor.set_columnwise_data(columnwise_data.data_ptr(), dtype, shape);
     tensor.set_columnwise_scale_inv(columnwise_scale_inv.data_ptr(), DType::kFloat32,
                                     std::vector<size_t>{static_cast<size_t>(sinv0), static_cast<size_t>(sinv1)});
   }
@@ -309,6 +295,7 @@ std::pair<TensorWrapper, py::object> MTFP8Quantizer::create_tensor(
   if (internal) {
     py::handle MTFP8TensorClass(reinterpret_cast<PyObject*>(MTFP8TensorBasePythonClass));
     ret = MTFP8TensorClass("rowwise_data"_a = data,
+                           "columnwise_data"_a = columnwise_data,
                            "rowwise_scale_inv"_a = rowwise_scale_inv,
                            "columnwise_scale_inv"_a = columnwise_scale_inv,
                            "fp8_dtype"_a = dtype,
@@ -318,6 +305,7 @@ std::pair<TensorWrapper, py::object> MTFP8Quantizer::create_tensor(
     ret = MTFP8TensorClass("shape"_a = torch_shape,
                            "dtype"_a = GetATenDType(fake_dtype),
                            "rowwise_data"_a = data,
+                           "columnwise_data"_a = columnwise_data,
                            "rowwise_scale_inv"_a = rowwise_scale_inv,
                            "columnwise_scale_inv"_a = columnwise_scale_inv,
                            "fp8_dtype"_a = dtype,

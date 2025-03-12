@@ -86,8 +86,12 @@ TensorWrapper NVTETensorFromMTFP8Tensor(py::handle tensor, Quantizer *quantizer)
   const auto rowwise_scale_inv_shape = getTensorShape(rowwise_scale_inv);
   ret.set_rowwise_scale_inv(rowwise_scale_inv.data_ptr(), DType::kFloat32, rowwise_scale_inv_shape);
 
-  bool columnwise_usage = !(tensor.attr("_columnwise_scale_inv").is_none());
+  bool columnwise_usage = !(tensor.attr("_columnwise_data").is_none());
   if (columnwise_usage) {
+    const at::Tensor &colwise_data = tensor.attr("_columnwise_data").cast<at::Tensor>();
+    const auto &shape = getTensorShape(colwise_data);
+    ret.set_columnwise_data(colwise_data.data_ptr(), dtype, shape);
+
     const at::Tensor &colwise_scale_inv = tensor.attr("_columnwise_scale_inv").cast<at::Tensor>();
     const auto colwise_scale_inv_shape = getTensorShape(colwise_scale_inv);
     ret.set_columnwise_scale_inv(colwise_scale_inv.data_ptr(), DType::kFloat32, colwise_scale_inv_shape);
