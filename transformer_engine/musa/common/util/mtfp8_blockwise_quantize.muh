@@ -1,0 +1,159 @@
+#ifndef TRANSFORMER_ENGINE_MUSA_COMMON_UTIL_MTFP8_BLOCKWISE_QUANTIZE_MUH_
+#define TRANSFORMER_ENGINE_MUSA_COMMON_UTIL_MTFP8_BLOCKWISE_QUANTIZE_MUH_
+
+#include "../common.h"
+#include "../utils.muh"
+#include "math.h"
+#include "mtfp8_utils.muh"
+
+#include <algorithm>
+
+#include "transformer_engine/transformer_engine.h"
+
+namespace transformer_engine::mtfp8 {
+
+template <
+    typename Param,
+    float (*OP)(float, const Param &),
+    typename IType,
+    typename OType,
+    typename CType,
+    size_t VLEN>
+__global__ void fp8_nn_blockwise_n_to_1_kernel(
+    const IType* inp,
+    const CType* noop,
+    OType* out,
+    CType* sinv,
+    size_t M,
+    size_t N,
+    size_t block_m,
+    size_t block_n,
+    size_t rounds,
+    Param param) {
+  if (noop != nullptr && noop[0] == 1.0f) return;
+  using IVecT = Vec<IType, VLEN>;
+  using CVecT = Vec<CType, VLEN>;
+  using OVecT = Vec<OType, VLEN>;
+
+  extern __shared__ __align__(alignof(size_t)) char temp[];
+  const size_t tid = threadIdx.x;
+  const size_t wrap_id = tid / wrap_size;
+  const size_t lane_id = tid % wrap_size;
+  const size_t n_wraps = blockDim.x / wrap_size;
+
+  auto* temp_base = reinterpret_cast<CVecT*>(temp);
+  auto* offset_base = reinterpret_cast<size_t*>(temp + block_m * block_n * sizeof(CType)) + tid * rounds;
+
+  const size_t stride = blockDim.x;
+  const size_t threads_per_col = block_n / VLEN;
+
+  const size_t x_base = blockIdx.x * block_m;
+  const size_t y_base = blockIdx.y * block_n;
+
+  size_t idx = tid;
+  size_t act_round = 0;
+  IVecT vec_in;
+
+  CType amax = 0;
+  __shared__ CType staging[max_wraps_per_block];
+  __shared__ CType block_amax;
+
+  for (; act_round < rounds; ++act_round) {
+    size_t x_global = x_base + idx / threads_per_col;
+    if (x_global < M) {
+      size_t y_global = y_base + VLEN * (idx % threads_per_col);
+      size_t offset = x_global * N + y_global;
+      *(offset_base + act_round) = offset;
+
+      vec_in.load_from(inp + offset, 0);
+      CVecT& temp = *(temp_base + idx);
+#pragma unroll
+      for (size_t j = 0; j < VLEN; ++j) {
+        temp.data.elt[j] = (CType)(OP((float)vec_in.data.elt[j], param));
+        __builtin_assume(amax >= 0);
+        amax = fmaxf(fabsf(temp.data.elt[j]), amax);
+      }
+      idx += stride;
+    } else {
+      break;
+    }
+  }
+
+  amax = warp_reduce_max<wrap_size>(amax);
+  if (lane_id == 0) {
+    staging[wrap_id] = amax;
+  }
+  __syncthreads_lm();
+
+  amax = 0;
+  if (wrap_id == 0) {
+    amax = tid < n_wraps ? staging[tid] : 0;
+    amax = warp_reduce_max<wrap_size>(amax);
+  }
+  if (tid == 0) {
+    block_amax = amax;
+  }
+  __syncthreads_lm();
+
+  CType scale = (CType)(Quantized_Limits<OType>::max_norm) / block_amax;
+
+  OVecT vec_out;
+  idx = tid;
+  for (size_t i = 0; i < act_round; ++i) {
+    CVecT& temp = *(temp_base + idx);
+#pragma unroll
+    for (size_t j = 0; j < VLEN; ++j) {
+      vec_out.data.elt[j] = (OType)(temp.data.elt[j] * scale);
+    }
+    vec_out.store_to(out + *(offset_base + i), 0);
+    idx += stride;
+  }
+
+  if (tid == 0) {
+    const size_t sinv_offset = blockIdx.x * gridDim.y + blockIdx.y;
+    *(sinv + sinv_offset) = block_amax * (CType)(Quantized_Limits<OType>::max_norm_rcp);
+  }
+}
+
+template <
+    typename Param,
+    float (*OP)(float, const Param &),
+    typename IType,
+    typename OType,
+    typename CType>
+inline void fp8_blockwise_cast(
+    const IType* inp,
+    const CType* noop,
+    OType* out,
+    CType* sinv,
+    size_t M,
+    size_t N,
+    size_t block_m,
+    size_t block_n,
+    Param param,
+    musaStream_t stream) {
+  NVTE_CHECK(block_m == block_n);
+  NVTE_CHECK(N % block_n == 0);
+
+  const int block_x = (int)ceil_div(M, block_m);
+  const int block_y = (int)(N / block_n);
+  dim3 blocks(block_x, block_y);
+
+  constexpr size_t VLEN = io_bytes / sizeof(IType);
+  const size_t full_threads = block_m * (block_n / VLEN);
+  const int threads = (int)(std::min(full_threads, max_threads_per_block));
+  NVTE_CHECK(threads % (int)wrap_size == 0);
+
+  const size_t rounds = ceil_div(full_threads, (size_t)threads);
+  const size_t shm_trans = block_m * block_n * sizeof(CType);
+  const size_t shm_offsets = threads * rounds * sizeof(size_t);
+  const size_t shm_total = shm_trans + shm_offsets;
+
+  fp8_nn_blockwise_n_to_1_kernel<Param, OP, IType, OType, CType, VLEN>
+      <<<blocks, threads, shm_total, stream>>>
+          (inp, noop, out, sinv, M, N, block_m, block_n, rounds, param);
+}
+
+} // namespace transformer_engine::mtfp8
+
+#endif // TRANSFORMER_ENGINE_MUSA_COMMON_UTIL_MTFP8_BLOCKWISE_QUANTIZE_MUH_
