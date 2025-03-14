@@ -399,6 +399,7 @@ def initialize_ub(
                 atomic_gemm=atomic_gemm,
                 gemm_priority=gemm_priority,
                 comm_priority=comm_priority,
+                use_ce=use_ce,
                 rs_overlap_first_gemm=pipeline_rs_overlap_first_gemm,
             )
         _ub_communicators[name] = ub_obj
