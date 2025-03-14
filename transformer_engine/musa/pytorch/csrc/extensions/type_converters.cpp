@@ -76,7 +76,7 @@ TensorWrapper NVTETensorFromMXFP8Tensor(py::handle tensor, Quantizer *quantizer)
 
 TensorWrapper NVTETensorFromMTFP8Tensor(py::handle tensor, Quantizer *quantizer) {
   const DType dtype = tensor.attr("_fp8_dtype").cast<DType>();
-  auto ret = TensorWrapper(quantizer->get_scaling_mode());
+  auto ret = TensorWrapper(NVTE_MTFP8_BLOCK_SCALING);
 
   const at::Tensor &rowwise_data = tensor.attr("_rowwise_data").cast<at::Tensor>();
   const auto &shape = getTensorShape(rowwise_data);

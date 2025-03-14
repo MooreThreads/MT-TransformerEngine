@@ -152,6 +152,8 @@ inline void fp8_blockwise_cast(
   fp8_nn_blockwise_n_to_1_kernel<Param, OP, IType, OType, CType, VLEN>
       <<<blocks, threads, shm_total, stream>>>
           (inp, noop, out, sinv, M, N, block_m, block_n, rounds, param);
+
+  NVTE_CHECK_CUDA(musaGetLastError());
 }
 
 } // namespace transformer_engine::mtfp8

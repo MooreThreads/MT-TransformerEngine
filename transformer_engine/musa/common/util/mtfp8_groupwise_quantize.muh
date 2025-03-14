@@ -130,6 +130,8 @@ inline void fp8_groupwise_cast(
     fp8_groupwise_1_to_n_kernel<Param, OP, IType, OType, CType, VLEN>
         <<<blocks, (int)threads, shm_trans, stream>>>(
           inp, noop, out, sinv, M, N, group_size, param);
+
+    NVTE_CHECK_CUDA(musaGetLastError());
   }
 }
 

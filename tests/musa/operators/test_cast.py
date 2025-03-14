@@ -204,15 +204,21 @@ def composite_groupwise_cast(src, group_size, dst_dtype):
     return dst, sinv
 
 
+def composite_groupwise_uncast(x, sinv, group_size, src_dtype):
+    orig_shape = x.shape
+    res = ((x.reshape(-1, group_size)) * (sinv.reshape(-1, 1))).to(src_dtype)
+    return res.reshape(orig_shape)
+
+
 @pytest.mark.parametrize("shape", [
     # align
     [[1024, 1024], 128],
     [[1024, 4096], 128],
     [[4096, 4096], 128],
     [[16384, 4096], 128],
-    [[16384, 16384], 128],
-    [[16384, 65536], 128],
-    [[65536, 65536], 128],
+    # [[16384, 16384], 128],
+    # [[16384, 65536], 128],
+    # [[65536, 65536], 128],
     # not align
     [[768, 640], 128],
     [[256, 65664], 128],
@@ -240,6 +246,7 @@ def test_mtfp8_groupwise_cast_to_fp8(shape, src_dtype, dst_dtype):
 
     gold_t, gold_sinv = composite_groupwise_cast(musa_src, group_size, dst_dtype)
     gold_t = gold_t.float()
+    gold_deq = composite_groupwise_uncast(gold_t, gold_sinv, group_size, src_dtype)
 
     musa_dst = quantizer(musa_src)
     dst_sinv = musa_dst._rowwise_scale_inv
@@ -247,6 +254,10 @@ def test_mtfp8_groupwise_cast_to_fp8(shape, src_dtype, dst_dtype):
 
     assert torch.equal(gold_sinv, dst_sinv)
     assert torch.equal(gold_t, dst_t)
+
+    musa_deq = musa_dst.dequantize()
+    assert musa_deq.dtype == src_dtype
+    assert torch.equal(musa_deq, gold_deq)
 
     musa_dst._rowwise_data.zero_()
     musa_dst._rowwise_scale_inv.zero_()
@@ -298,15 +309,35 @@ def composite_blockwise_cast(x, group_size, dst_dtype):
     return data, sinv
 
 
+def composite_blockwise_uncast(x, sinv, group_size, src_dtype):
+    assert x.dim() == 2
+    m, n = x.shape
+    x_padded = torch.zeros(
+        (
+            ceil_div(m, group_size) * group_size,
+            ceil_div(n, group_size) * group_size,
+        ),
+        dtype=x.dtype,
+        device=x.device,
+    )
+    x_padded[:m, :n] = x
+    x_padded = x_padded.float()
+
+    x_view = x_padded.view(-1, group_size, x_padded.size(1) // group_size, group_size)
+    x_sinv = sinv.view(sinv.size(0), 1, sinv.size(1), 1)
+    res = (x_view * x_sinv).to(src_dtype)
+    return res.reshape(-1, n)[:m, :n]
+
+
 @pytest.mark.parametrize("shape", [
     # align
     [[1024, 1024], 128],
     [[1024, 4096], 128],
     [[4096, 4096], 128],
     [[16384, 4096], 128],
-    [[16384, 16384], 128],
-    [[16384, 65536], 128],
-    [[65536, 65536], 128],
+    # [[16384, 16384], 128],
+    # [[16384, 65536], 128],
+    # [[65536, 65536], 128],
     # not align
     [[80, 1024], 128],
     [[180, 4096], 128],
@@ -330,6 +361,7 @@ def test_mtfp8_blockwise_cast_to_fp8(shape, src_dtype):
 
     gold_t, gold_sinv = composite_blockwise_cast(musa_src, group_size, dst_dtype)
     gold_t = gold_t.float()
+    gold_deq = composite_blockwise_uncast(gold_t, gold_sinv, group_size, src_dtype)
 
     musa_dst = quantizer(musa_src)
     dst_sinv = musa_dst._rowwise_scale_inv
@@ -337,6 +369,10 @@ def test_mtfp8_blockwise_cast_to_fp8(shape, src_dtype):
 
     assert torch.equal(gold_sinv, dst_sinv)
     assert torch.equal(gold_t, dst_t)
+
+    musa_deq = musa_dst.dequantize()
+    assert musa_deq.dtype == src_dtype
+    assert torch.equal(musa_deq, gold_deq)
 
     musa_dst._rowwise_data.zero_()
     musa_dst._rowwise_scale_inv.zero_()

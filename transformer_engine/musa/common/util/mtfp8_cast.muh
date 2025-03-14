@@ -95,9 +95,7 @@ inline void mtfp8_quantize(
   mtfp8_quantize_dispatch<Param, OP>(input, noop, output, {}, stream);
 }
 
-inline void mtfp8_dequantize(const Tensor &input, Tensor *output, musaStream_t stream) {
-  NVTE_CHECK(false, "mtfp8_dequantize not yet implememted.");
-}
+void mtfp8_dequantize(const Tensor* input, Tensor* output, musaStream_t stream);
 
 }  // namespace transformer_engine
 

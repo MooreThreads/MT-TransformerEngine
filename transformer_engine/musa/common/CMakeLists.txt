@@ -113,6 +113,7 @@ list(APPEND transformer_engine_SOURCES
   util/rtc.cpp
   util/system.cpp
   util/mtfp8_cast_transpose.mu
+  util/mtfp8_dequantize.mu
 )
 set_source_files_properties(${transformer_engine_SOURCES}
   PROPERTIES
