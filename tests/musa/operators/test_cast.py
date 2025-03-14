@@ -1,5 +1,6 @@
 import torch, torch_musa
 import pytest
+import numpy as np
 
 import transformer_engine as te
 import transformer_engine_torch as tex
@@ -271,6 +272,11 @@ def test_mtfp8_groupwise_cast_to_fp8(shape, src_dtype, dst_dtype):
 
 @pytest.mark.parametrize("shape", [
     [[768, 1024], 128],
+    [[769, 1024], 128],
+    [[767, 1024], 128],
+    [[128, 128], 128],
+    [[230, 128], 128],
+    # [[16384, 65536], 128],  # for benchmark
 ])
 @pytest.mark.parametrize("src_dtype", [
     torch.bfloat16,
@@ -284,6 +290,65 @@ def test_mtfp8_groupwise_cast_transpose(shape, src_dtype, dst_dtype):
     quantizer = rs.make_quantizers()[0]
     musa_src = torch.randn(shape, dtype = src_dtype, device = dev)
     musa_dst = quantizer(musa_src)
+
+    # gen golden
+    dst_rowwise_golden, \
+        scale_inv_rowwise_golden, \
+            dst_columnwise_golden, \
+                scale_inv_columnwise_golden = _gen_mtfp8_groupwise_cast_transpose_golden(musa_src, group_size, dst_dtype)
+
+    assert torch.allclose(scale_inv_rowwise_golden.to(torch.float32), musa_dst._rowwise_scale_inv.to(torch.float32), atol=1e-4, rtol=1e-4)
+    assert torch.allclose(scale_inv_columnwise_golden.to(torch.float32), musa_dst._columnwise_scale_inv.to(torch.float32), atol=1e-4, rtol=1e-4)
+
+    assert torch.allclose(dst_rowwise_golden.to(torch.float32), musa_dst._rowwise_data.view(dst_dtype).to(torch.float32), atol=1e-4, rtol=1e-4)
+    assert torch.allclose(dst_columnwise_golden.to(torch.float32), musa_dst._columnwise_data.view(dst_dtype).to(torch.float32), atol=1e-4, rtol=1e-4)
+
+    # np.testing.assert_allclose(dst_rowwise_golden.to(torch.float32).cpu().numpy(), musa_dst._rowwise_data.view(dst_dtype).to(torch.float32).cpu().numpy(), atol=1e-2, rtol=1e-2)
+    # np.testing.assert_allclose(dst_columnwise_golden.to(torch.float32).cpu().numpy(), musa_dst._columnwise_data.view(dst_dtype).to(torch.float32).cpu().numpy(), atol=1e-2, rtol=1e-2)
+
+
+def _gen_mtfp8_groupwise_cast_transpose_golden(input_tensor, group_size, dst_dtype):
+    fp_max = fp8_max(dst_dtype)
+    input_tensor_tmp = input_tensor.reshape(-1, input_tensor.size(-1))
+    nrows, ncols = input_tensor_tmp.shape
+
+    ngroup_col = ncols // group_size
+    ngroup_row = nrows // group_size
+
+    # block-wise scaling along column
+    # we assume always aligned on channels's dimension
+    tmp01 = input_tensor_tmp.reshape(nrows, ngroup_col, group_size).to(torch.float32)
+    amax = torch.abs(tmp01).max(-1, keepdim=True)[0]
+    scale_inv = amax / fp_max
+    dst_rowwise = (tmp01 / scale_inv).to(dst_dtype).reshape(-1, ncols)
+    scale_inv_rowwise = scale_inv.reshape(nrows, ngroup_col)
+
+    if (nrows % group_size == 0):
+        # ALIGNED CASE
+
+        # block-wise scaling along row
+        tmp02 = input_tensor_tmp.reshape(ngroup_row, group_size, ncols).to(torch.float32)
+        amax = torch.abs(tmp02).max(1, keepdim=True)[0]
+        scale_inv = amax / fp_max
+        dst_columnwise = (tmp02 / scale_inv).to(dst_dtype).reshape(-1, ncols)
+        scale_inv_columnwise = scale_inv.reshape(ngroup_row, ncols)
+    else:
+        # NON-ALIGNED CASE
+        tmp02 = input_tensor_tmp.to(torch.float32)
+        nrows_padded = ((nrows + group_size - 1) // group_size) * group_size
+        ngroup_row_new = nrows_padded // group_size
+        padding_tensor = torch.zeros((nrows_padded - nrows, ncols), dtype=torch.float32, device=tmp02.device)
+        padded_tensor = torch.cat([tmp02, padding_tensor], 0)
+        padded_tensor_reshaped = padded_tensor.reshape(ngroup_row_new, group_size, ncols)
+        amax = torch.abs(padded_tensor_reshaped).max(1, keepdim=True)[0]
+        scale_inv = amax / fp_max
+        dst_columnwise = (padded_tensor_reshaped / scale_inv).to(dst_dtype).reshape(-1, ncols)
+        scale_inv_columnwise = scale_inv.reshape(ngroup_row_new, ncols)
+
+        dst_columnwise = dst_columnwise[:nrows, ...]
+
+
+    return dst_rowwise, scale_inv_rowwise, dst_columnwise, scale_inv_columnwise
 
 
 def composite_blockwise_cast(x, group_size, dst_dtype):

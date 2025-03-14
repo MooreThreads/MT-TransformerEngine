@@ -275,6 +275,23 @@ struct Vec {
     }
   }
 
+  __device__ Vec() = default;
+
+  __device__ Vec(const Elt_type& num) {
+#pragma unroll
+    for (int i = 0; i < NUM_ELT; i++) {
+      this->data.elt[i] = num;
+    }
+  }
+
+  __device__ Vec& operator=(const Elt_type& num) {
+#pragma unroll
+    for (int i = 0; i < NUM_ELT; i++) {
+      this->data.elt[i] = num;
+    }
+    return *this;
+  }
+
   template <typename Op>
   inline __device__ void assign(const Op &op) {
 #pragma unroll
