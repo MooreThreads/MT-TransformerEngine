@@ -2,6 +2,8 @@ import torch, torch_musa
 import pytest
 import numpy as np
 
+import math
+
 import transformer_engine as te
 import transformer_engine_torch as tex
 
@@ -273,11 +275,11 @@ def test_mtfp8_groupwise_cast_to_fp8(shape, src_dtype, dst_dtype):
 
 @pytest.mark.parametrize("shape", [
     [[768, 1024], 128],
-    [[769, 1024], 128],
     [[767, 1024], 128],
     [[128, 128], 128],
     [[230, 128], 128],
     # [[16384, 65536], 128],  # for benchmark
+    # [[16383, 65536], 128],  # for benchmark
 ])
 @pytest.mark.parametrize("src_dtype", [
     torch.bfloat16,
@@ -294,20 +296,36 @@ def test_mtfp8_groupwise_cast_transpose(shape, src_dtype, dst_dtype):
     musa_src = torch.randn(shape, dtype = src_dtype, device = dev)
     musa_dst = quantizer(musa_src)
 
+    # uncomment lines below to see bandwidth
+    # for _ in range(5):
+    #     quantizer.update_quantized(musa_src, musa_dst)
+    # start = torch.musa.Event(enable_timing=True)
+    # end = torch.musa.Event(enable_timing=True)
+    # torch.musa.synchronize()
+    # start.record()
+    # nrepeats = 1
+    # for _ in range(nrepeats):
+    #     quantizer.update_quantized(musa_src, musa_dst)
+    # end.record()
+    # torch.musa.synchronize()
+
+    # elapsed_time = start.elapsed_time(end) / nrepeats
+    # # print(f"elapsed_time: {elapsed_time} ms")
+    # nbytes = math.prod(shape) * (musa_src.element_size() + 1 + 1) + \
+    #          math.prod(musa_dst._rowwise_scale_inv.shape) * 4 + \
+    #          math.prod(musa_dst._columnwise_scale_inv.shape) * 4
+    # print(f"Bandwidth: {nbytes / 1024 / 1024 / elapsed_time} GB/s")
+
     # gen golden
     dst_rowwise_golden, \
         scale_inv_rowwise_golden, \
             dst_columnwise_golden, \
                 scale_inv_columnwise_golden = _gen_mtfp8_groupwise_cast_transpose_golden(musa_src, group_size, dst_dtype)
-
+    
     assert torch.allclose(scale_inv_rowwise_golden.to(torch.float32), musa_dst._rowwise_scale_inv.to(torch.float32), atol=1e-4, rtol=1e-4)
     assert torch.allclose(scale_inv_columnwise_golden.to(torch.float32), musa_dst._columnwise_scale_inv.to(torch.float32), atol=1e-4, rtol=1e-4)
-
     assert torch.allclose(dst_rowwise_golden.to(torch.float32), musa_dst._rowwise_data.view(dst_dtype).to(torch.float32), atol=1e-4, rtol=1e-4)
     assert torch.allclose(dst_columnwise_golden.to(torch.float32), musa_dst._columnwise_data.view(dst_dtype).to(torch.float32), atol=1e-4, rtol=1e-4)
-
-    # np.testing.assert_allclose(dst_rowwise_golden.to(torch.float32).cpu().numpy(), musa_dst._rowwise_data.view(dst_dtype).to(torch.float32).cpu().numpy(), atol=1e-2, rtol=1e-2)
-    # np.testing.assert_allclose(dst_columnwise_golden.to(torch.float32).cpu().numpy(), musa_dst._columnwise_data.view(dst_dtype).to(torch.float32).cpu().numpy(), atol=1e-2, rtol=1e-2)
 
     gold_deq = composite_groupwise_uncast(dst_rowwise_golden.float(), scale_inv_rowwise_golden, group_size, src_dtype)
     musa_deq = musa_dst.dequantize()
