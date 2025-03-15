@@ -241,8 +241,14 @@ MTFP8Quantizer::MTFP8Quantizer(const py::handle& quantizer) : Quantizer(quantize
 void MTFP8Quantizer::set_quantization_params(TensorWrapper* tensor) const {
   auto rowwise_data = tensor->get_rowwise_data();
   rowwise_data.dtype = static_cast<NVTEDType>(dtype);
+
+  auto columnwise_data = tensor->get_columnwise_data();
+  columnwise_data.dtype = static_cast<NVTEDType>(dtype);
+
   tensor->set_rowwise_data(
       rowwise_data.data_ptr, static_cast<DType>(rowwise_data.dtype), rowwise_data.shape);
+  tensor->set_columnwise_data(
+      columnwise_data.data_ptr, static_cast<DType>(columnwise_data.dtype), columnwise_data.shape);
 }
 
 std::pair<TensorWrapper, py::object> MTFP8Quantizer::create_tensor(

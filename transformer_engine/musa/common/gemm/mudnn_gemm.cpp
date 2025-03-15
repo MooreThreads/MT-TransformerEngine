@@ -29,6 +29,64 @@ void init_streams_and_events() {
   }
 }
 
+const SimpleTensor* get_data(const Tensor* te_tensor, bool trans) {
+  if (trans && te_tensor->has_columnwise_data()) {
+    return &(te_tensor->columnwise_data);
+  }
+  return &(te_tensor->data);
+}
+
+struct GEMM_INFO {
+  const SimpleTensor* data_a = nullptr;
+  const SimpleTensor* sinv_a = nullptr;
+  const SimpleTensor* data_b = nullptr;
+  const SimpleTensor* sinv_b = nullptr;
+  bool is_per_tensor = true;
+};
+
+GEMM_INFO get_gemm_info(
+    const Tensor* a,
+    bool trans_a,
+    const Tensor* b,
+    bool trans_b) {
+  NVTE_CHECK(a->scaling_mode == b->scaling_mode,
+             "Inputs A and B to GEMM need to have the same scaling mode!");
+  NVTE_CHECK(a->has_data() || a->has_columnwise_data(), "Input A does not hold any data!");
+  NVTE_CHECK(b->has_data() || b->has_columnwise_data(), "Input B does not hold any data!");
+
+  GEMM_INFO info;
+  info.is_per_tensor = is_tensor_scaling(a->scaling_mode);
+  if (info.is_per_tensor) {
+    info.data_a = &(a->data);
+    info.sinv_a = &(a->scale_inv);
+    info.data_b = &(b->data);
+    info.sinv_b = &(b->scale_inv);
+    return info;
+  }
+
+  const auto a_data_dim_m = (a->data).shape[0];
+  const auto a_sinv_dim_m = (a->scale_inv).shape[0];
+  const bool weight_is_nn_block = (a_data_dim_m != a_sinv_dim_m);
+
+  if (weight_is_nn_block || trans_a) {
+    info.data_a = &(a->data);
+    info.sinv_a = &(a->scale_inv);
+  } else  {
+    info.data_a = &(a->columnwise_data);
+    info.sinv_a = &(a->columnwise_scale_inv);
+  }
+
+  if (trans_b) {
+    info.data_b = &(b->columnwise_data);
+    info.sinv_b = &(b->columnwise_scale_inv);
+  } else {
+    info.data_b = &(b->data);
+    info.sinv_b = &(b->scale_inv);
+  }
+
+  return info;
+}
+
 } // anonymous namespace
 
 void non_fp8_gemm(
@@ -45,8 +103,8 @@ void non_fp8_gemm(
   h.SetStream(stream);
 
   const bool has_bias = biasTensor->has_data();
-  auto mu_l = CreateMUTensor(inputB->data, Flat2DimShape(inputB));
-  auto mu_r = CreateMUTensor(inputA->data, Flat2DimShape(inputA));
+  auto mu_l = CreateMUTensor(*get_data(inputB, transb), Flat2DimShape(inputB));
+  auto mu_r = CreateMUTensor(*get_data(inputA, transa), Flat2DimShape(inputA));
   auto mu_b = has_bias ? CreateMUTensor(biasTensor->data) : empty_mu_tensor;
   auto mu_o = CreateMUTensor(outputD->data, Flat2DimShape(outputD));
 
@@ -84,13 +142,19 @@ void fp8_gemm(
   const bool has_output_scale = (outputD->scale.dptr != nullptr);
   const bool has_output_amax = (outputD->amax.dptr != nullptr);
 
-  auto mu_l = CreateMUTensor(inputB->data, Flat2DimShape(inputB));
-  auto mu_r = CreateMUTensor(inputA->data, Flat2DimShape(inputA));
+  const auto info = get_gemm_info(inputA, transa, inputB, transb);
+  const auto& data_b = *(info.data_b);
+  const auto& sinv_b = *(info.sinv_b);
+  const auto& data_a = *(info.data_a);
+  const auto& sinv_a = *(info.sinv_a);
+
+  auto mu_l = CreateMUTensor(data_b, Flat2DimShape(inputB));
+  auto mu_r = CreateMUTensor(data_a, Flat2DimShape(inputA));
   auto mu_b = has_bias ? CreateMUTensor(biasTensor->data) : empty_mu_tensor;
   auto mu_o = CreateMUTensor(outputD->data, Flat2DimShape(outputD));
 
-  auto mu_scale_l = CreateMUTensor(inputB->scale_inv);
-  auto mu_scale_r = CreateMUTensor(inputA->scale_inv);
+  auto mu_scale_l = CreateMUTensor(sinv_b);
+  auto mu_scale_r = CreateMUTensor(sinv_a);
   auto mu_scale_b = has_bias_scale
       ? CreateMUTensor(biasTensor->scale_inv) : empty_mu_tensor;
   auto mu_scale_o = has_output_scale
@@ -111,7 +175,13 @@ void fp8_gemm(
   }
 
   ::musa::dnn::MatMulLtParam param;
-  CHECK_MUDNN_STATUS(param.SetScale(mu_scale_l, mu_scale_r, mu_scale_b, mu_scale_o), "SetScale");
+  if (info.is_per_tensor) {
+    CHECK_MUDNN_STATUS(param.SetScale(mu_scale_l, mu_scale_r, mu_scale_b, mu_scale_o), "SetScale");
+  } else {
+    NVTE_CHECK(inputB->scale_inv.shape.size() == 2);
+    const auto tile_size = static_cast<int>(inputB->data.shape[1] / inputB->scale_inv.shape[1]);
+    CHECK_MUDNN_STATUS(param.SetScale(mu_scale_l, mu_scale_r, mu_scale_b, mu_scale_o, tile_size), "SetScale");
+  }
   CHECK_MUDNN_STATUS(param.SetAmaxD(mu_amax_o), "SetAmax");
 
   op.RunLt(h, mu_o, mu_l, mu_r, mu_o, mu_b, param, InternalMemAlloc);
@@ -162,16 +232,7 @@ void mudnn_gemm(
   const auto* biasTensor = reinterpret_cast<const Tensor*>(bias);
   auto* geluOut = reinterpret_cast<Tensor*>(pre_gelu_out);
 
-  NVTE_CHECK(
-      inputA->scaling_mode == NVTE_DELAYED_TENSOR_SCALING,
-      "Only per-tensor-scaling is supported!");
-  NVTE_CHECK(
-      inputB->scaling_mode == NVTE_DELAYED_TENSOR_SCALING,
-      "Only per-tensor-scaling is supported!");
-  NVTE_CHECK(
-      outputD->scaling_mode == NVTE_DELAYED_TENSOR_SCALING,
-      "Only per-tensor-scaling is supported!");
-  NVTE_CHECK(inputA->has_data() && inputB->has_data() && outputD->has_data());
+  NVTE_CHECK(outputD->has_data());
   NVTE_CHECK(!geluOut->has_data(), "Gelu epilogue is not supported!");
 
   const auto A_type = inputA->dtype();

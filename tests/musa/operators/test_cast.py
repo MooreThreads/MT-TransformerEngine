@@ -280,9 +280,11 @@ def test_mtfp8_groupwise_cast_to_fp8(shape, src_dtype, dst_dtype):
 ])
 @pytest.mark.parametrize("src_dtype", [
     torch.bfloat16,
+    torch.float,
 ])
 @pytest.mark.parametrize("dst_dtype", [
     torch.float8_e4m3fn,
+    torch.float8_e5m2,
 ])
 def test_mtfp8_groupwise_cast_transpose(shape, src_dtype, dst_dtype):
     shape, group_size = shape
@@ -386,7 +388,6 @@ def composite_blockwise_uncast(x, sinv, group_size, src_dtype):
         device=x.device,
     )
     x_padded[:m, :n] = x
-    x_padded = x_padded.float()
 
     x_view = x_padded.view(-1, group_size, x_padded.size(1) // group_size, group_size)
     x_sinv = sinv.view(sinv.size(0), 1, sinv.size(1), 1)
