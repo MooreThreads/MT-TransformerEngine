@@ -18,7 +18,6 @@ string(APPEND MUSA_MCC_FLAGS " --offload-arch=mp_${MUSA_ARCH}")
 set(MUSA_VERBOSE_BUILD ON)
 set(MUSA_LINK_LIBRARIES_KEYWORD PUBLIC)
 
-string(APPEND MUSA_MCC_FLAGS " -g")
 if (CMAKE_BUILD_TYPE STREQUAL "Debug")
   string(APPEND MUSA_MCC_FLAGS " -g")
 endif()

@@ -7,13 +7,13 @@
 #ifndef TRANSFORMER_ENGINE_COMMON_UTIL_CUDA_RUNTIME_H_
 #define TRANSFORMER_ENGINE_COMMON_UTIL_CUDA_RUNTIME_H_
 
-#include <musa_runtime_api.h>
+#include <cuda_runtime_api.h>
 
 #include <string>
 
 namespace transformer_engine {
 
-namespace musa {
+namespace cuda {
 
 /* \brief Number of accessible devices */
 int num_devices();
