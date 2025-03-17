@@ -19,6 +19,8 @@ inline size_t ceil_div(size_t a, size_t b) {
   return (a + b - 1) / b;
 }
 
+inline __device__ float global_amax_min = 0.0001;
+
 } // namespace transformer_engine::mtfp8
 
 #endif // TRANSFORMER_ENGINE_MUSA_COMMON_UTIL_MTFP8_UTILS_MUH_

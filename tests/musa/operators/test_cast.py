@@ -198,6 +198,7 @@ def composite_groupwise_cast(src, group_size, dst_dtype):
 
     temp = temp.reshape(-1, group_size)
     amax = torch.abs(temp).max(-1, keepdim=True)[0]
+    amax = amax.clamp(1e-4)
     scale = fp_max / amax
 
     dst = (temp * scale).to(dst_dtype).reshape(-1, cols)
@@ -308,6 +309,11 @@ def test_mtfp8_groupwise_cast_transpose(shape, src_dtype, dst_dtype):
     # np.testing.assert_allclose(dst_rowwise_golden.to(torch.float32).cpu().numpy(), musa_dst._rowwise_data.view(dst_dtype).to(torch.float32).cpu().numpy(), atol=1e-2, rtol=1e-2)
     # np.testing.assert_allclose(dst_columnwise_golden.to(torch.float32).cpu().numpy(), musa_dst._columnwise_data.view(dst_dtype).to(torch.float32).cpu().numpy(), atol=1e-2, rtol=1e-2)
 
+    gold_deq = composite_groupwise_uncast(dst_rowwise_golden.float(), scale_inv_rowwise_golden, group_size, src_dtype)
+    musa_deq = musa_dst.dequantize()
+    assert musa_deq.dtype == src_dtype
+    assert torch.equal(musa_deq, gold_deq)
+
 
 def _gen_mtfp8_groupwise_cast_transpose_golden(input_tensor, group_size, dst_dtype):
     fp_max = fp8_max(dst_dtype)
@@ -321,6 +327,7 @@ def _gen_mtfp8_groupwise_cast_transpose_golden(input_tensor, group_size, dst_dty
     # we assume always aligned on channels's dimension
     tmp01 = input_tensor_tmp.reshape(nrows, ngroup_col, group_size).to(torch.float32)
     amax = torch.abs(tmp01).max(-1, keepdim=True)[0]
+    amax = amax.clamp(1e-4)
     scale_inv = amax / fp_max
     dst_rowwise = (tmp01 / scale_inv).to(dst_dtype).reshape(-1, ncols)
     scale_inv_rowwise = scale_inv.reshape(nrows, ngroup_col)
@@ -331,6 +338,7 @@ def _gen_mtfp8_groupwise_cast_transpose_golden(input_tensor, group_size, dst_dty
         # block-wise scaling along row
         tmp02 = input_tensor_tmp.reshape(ngroup_row, group_size, ncols).to(torch.float32)
         amax = torch.abs(tmp02).max(1, keepdim=True)[0]
+        amax = amax.clamp(1e-4)
         scale_inv = amax / fp_max
         dst_columnwise = (tmp02 / scale_inv).to(dst_dtype).reshape(-1, ncols)
         scale_inv_columnwise = scale_inv.reshape(ngroup_row, ncols)
@@ -343,6 +351,7 @@ def _gen_mtfp8_groupwise_cast_transpose_golden(input_tensor, group_size, dst_dty
         padded_tensor = torch.cat([tmp02, padding_tensor], 0)
         padded_tensor_reshaped = padded_tensor.reshape(ngroup_row_new, group_size, ncols)
         amax = torch.abs(padded_tensor_reshaped).max(1, keepdim=True)[0]
+        amax = amax.clamp(1e-4)
         scale_inv = amax / fp_max
         dst_columnwise = (padded_tensor_reshaped / scale_inv).to(dst_dtype).reshape(-1, ncols)
         scale_inv_columnwise = scale_inv.reshape(ngroup_row_new, ncols)
@@ -369,8 +378,9 @@ def composite_blockwise_cast(x, group_size, dst_dtype):
 
     x_view = x_padded.view(-1, group_size, x_padded.size(1) // group_size, group_size)
     x_amax = x_view.abs().float().amax(dim=(1, 3), keepdim=True)
+    x_amax = x_amax.clamp(1e-4)
     x_scaled = (x_view * (fpmax / x_amax)).to(dst_dtype)
-    
+
     data = x_scaled.view_as(x_padded)[:m, :n].contiguous()
     sinv = (x_amax / fpmax).view(x_view.size(0), x_view.size(2))
     return data, sinv

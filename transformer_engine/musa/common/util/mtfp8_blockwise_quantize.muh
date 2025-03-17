@@ -70,8 +70,8 @@ __global__ void fp8_nn_blockwise_n_to_1_kernel(
 #pragma unroll
       for (size_t j = 0; j < VLEN; ++j) {
         temp.data.elt[j] = (CType)(OP((float)vec_in.data.elt[j], param));
-        __builtin_assume(amax >= 0);
         amax = fmaxf(fabsf(temp.data.elt[j]), amax);
+        amax = fmaxf(amax, global_amax_min);
       }
       idx += stride;
     } else {

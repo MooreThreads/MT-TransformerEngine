@@ -14,6 +14,7 @@ using at::musa::GetComputeModeFromCtx;
 using transformer_engine::musa::Flat2DimShape;
 using transformer_engine::musa::CreateMUTensor;
 using transformer_engine::musa::ToTorchDtype;
+using transformer_engine::musa::SetMUTensorDType;
 
 const auto empty_te_tensor = Tensor();
 const auto empty_mu_tensor = at::musa::CreateEmptyMUTensor();
@@ -152,6 +153,9 @@ void fp8_gemm(
   auto mu_r = CreateMUTensor(data_a, Flat2DimShape(inputA));
   auto mu_b = has_bias ? CreateMUTensor(biasTensor->data) : empty_mu_tensor;
   auto mu_o = CreateMUTensor(outputD->data, Flat2DimShape(outputD));
+  if (!has_bias) {
+    SetMUTensorDType(outputD->dtype(), mu_b);
+  }
 
   auto mu_scale_l = CreateMUTensor(sinv_b);
   auto mu_scale_r = CreateMUTensor(sinv_a);

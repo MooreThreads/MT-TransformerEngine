@@ -132,6 +132,7 @@ def musa_check_fp8_support() -> Tuple[bool, str]:
     return False, "Device compute capability 3.1 or higher required for FP8 execution."
 
 
+@classmethod
 def musa_add_fp8_tensors_to_global_buffer(
     cls,
     fp8_meta: Dict[str, Any],
@@ -141,12 +142,14 @@ def musa_add_fp8_tensors_to_global_buffer(
     cls._orig_add_fp8_tensors_to_global_buffer(fp8_meta)
 
 
+@classmethod
 def musa_copy_forward_fp8_meta_tensors_for_recompute(cls, fp8_meta: Dict[str, Any]) -> None:
     if fp8_meta["recipe"].mtfp8():
         return
     cls._orig_copy_forward_fp8_meta_tensors_for_recompute(fp8_meta)
 
 
+@classmethod
 def musa_get_old_fp8_meta_tensors_for_recompute(cls, fp8_meta: Dict[str, Any]) -> None:
     if fp8_meta["recipe"].mtfp8():
         return

@@ -111,7 +111,9 @@ __global__ void  mtfp8_cast_transpose_general_kernel(
             IType value = tmp_reg.data.elt[offset];
             shm[group_inner_y_id + ii_y][ndword][threadIdx.x * ELEMENTS_PER_BANK + elm_id] = value;
             amax_rowwise[ii_y] = fmaxf(amax_rowwise[ii_y], fabsf(value));
+            amax_rowwise[ii_y] = fmaxf(amax_rowwise[ii_y], global_amax_min);
             amax_columnwise[offset] = fmaxf(amax_columnwise[offset], fabsf(value));
+            amax_columnwise[offset] = fmaxf(amax_columnwise[offset], global_amax_min);
           }
         }
 

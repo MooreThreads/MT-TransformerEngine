@@ -59,8 +59,8 @@ __global__ void fp8_groupwise_1_to_n_kernel(
 #pragma unroll
     for (size_t j = 0; j < VLEN; ++j) {
       tran.data.elt[j] = (CType)(OP((float)vec_in.data.elt[j], param));
-      __builtin_assume(amax >= 0);
       amax = fmaxf(fabsf(tran.data.elt[j]), amax);
+      amax = fmaxf(amax, global_amax_min);
     }
   }
 
