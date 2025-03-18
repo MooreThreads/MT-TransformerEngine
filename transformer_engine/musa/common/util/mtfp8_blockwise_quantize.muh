@@ -18,7 +18,8 @@ template <
     typename IType,
     typename OType,
     typename CType,
-    size_t VLEN>
+    size_t VLEN,
+    size_t NCol>
 __global__ void fp8_nn_blockwise_n_to_1_kernel(
     const IType* inp,
     const CType* noop,
@@ -29,40 +30,54 @@ __global__ void fp8_nn_blockwise_n_to_1_kernel(
     size_t block_m,
     size_t block_n,
     size_t rounds,
+    size_t n_warps,
     Param param) {
   if (noop != nullptr && noop[0] == 1.0f) return;
   using IVecT = Vec<IType, VLEN>;
   using CVecT = Vec<CType, VLEN>;
   using OVecT = Vec<OType, VLEN>;
 
+  using Trait_VLEN = VlenTrait<VLEN>;
+  using Trait_COL = VlenTrait<NCol>;
+
   extern __shared__ __align__(alignof(size_t)) char temp[];
-  const size_t tid = threadIdx.x;
-  const size_t wrap_id = tid / wrap_size;
-  const size_t lane_id = tid % wrap_size;
-  const size_t n_wraps = blockDim.x / wrap_size;
+
+  const size_t tid = threadIdx.y * blockDim.x + threadIdx.x;
+  const size_t warp_id = tid >> warp_bits;
+  const size_t lane_id = tid & warp_mask;
 
   auto* temp_base = reinterpret_cast<CVecT*>(temp);
   auto* offset_base = reinterpret_cast<size_t*>(temp + block_m * block_n * sizeof(CType)) + tid * rounds;
 
-  const size_t stride = blockDim.x;
-  const size_t threads_per_col = block_n / VLEN;
+  const size_t stride = blockDim.x * blockDim.y;
 
-  const size_t x_base = blockIdx.x * block_m;
-  const size_t y_base = blockIdx.y * block_n;
+  const size_t base_m = blockIdx.y * block_m;
+  const size_t base_n = blockIdx.x * block_n;
 
   size_t idx = tid;
   size_t act_round = 0;
   IVecT vec_in;
 
   CType amax = 0;
-  __shared__ CType staging[max_wraps_per_block];
-  __shared__ CType block_amax;
+  __shared__ CType staging[max_warps_per_block];
 
   for (; act_round < rounds; ++act_round) {
-    size_t x_global = x_base + idx / threads_per_col;
-    if (x_global < M) {
-      size_t y_global = y_base + VLEN * (idx % threads_per_col);
-      size_t offset = x_global * N + y_global;
+    size_t global_m = base_m;
+    if constexpr (Trait_COL::is_power_of_2) {
+      global_m += (idx >> Trait_COL::bits);
+    } else {
+      global_m += (idx / blockDim.x);
+    }
+
+    if (global_m < M) {
+      size_t global_n = base_n;
+      if constexpr (Trait_COL::is_power_of_2) {
+        global_n += ((idx & Trait_COL::mask) << Trait_VLEN::bits);
+      } else {
+        global_n += ((idx % blockDim.x) << Trait_VLEN::bits);
+      }
+
+      size_t offset = global_m * N + global_n;
       *(offset_base + act_round) = offset;
 
       vec_in.load_from(inp + offset, 0);
@@ -79,23 +94,23 @@ __global__ void fp8_nn_blockwise_n_to_1_kernel(
     }
   }
 
-  amax = warp_reduce_max<wrap_size>(amax);
+  amax = warp_reduce_max<warp_size>(amax);
   if (lane_id == 0) {
-    staging[wrap_id] = amax;
+    staging[warp_id] = amax;
   }
   __syncthreads_lm();
 
   amax = 0;
-  if (wrap_id == 0) {
-    amax = tid < n_wraps ? staging[tid] : 0;
-    amax = warp_reduce_max<wrap_size>(amax);
+  if (warp_id == 0) {
+    amax = tid < n_warps ? staging[tid] : 0;
+    amax = warp_reduce_max<warp_size>(amax);
   }
   if (tid == 0) {
-    block_amax = amax;
+    staging[0] = amax;                                              // block_amax
+    staging[1] = (CType)(Quantized_Limits<OType>::max_norm) / amax; // block_scale
   }
   __syncthreads_lm();
-
-  CType scale = (CType)(Quantized_Limits<OType>::max_norm) / block_amax;
+  amax = staging[1];
 
   OVecT vec_out;
   idx = tid;
@@ -103,15 +118,15 @@ __global__ void fp8_nn_blockwise_n_to_1_kernel(
     CVecT& temp = *(temp_base + idx);
 #pragma unroll
     for (size_t j = 0; j < VLEN; ++j) {
-      vec_out.data.elt[j] = (OType)(temp.data.elt[j] * scale);
+      vec_out.data.elt[j] = (OType)(temp.data.elt[j] * amax);
     }
     vec_out.store_to(out + *(offset_base + i), 0);
     idx += stride;
   }
 
   if (tid == 0) {
-    const size_t sinv_offset = blockIdx.x * gridDim.y + blockIdx.y;
-    *(sinv + sinv_offset) = block_amax * (CType)(Quantized_Limits<OType>::max_norm_rcp);
+    const size_t sinv_offset = blockIdx.y * gridDim.x + blockIdx.x;
+    *(sinv + sinv_offset) = staging[0] * (CType)(Quantized_Limits<OType>::max_norm_rcp);
   }
 }
 
@@ -135,23 +150,38 @@ inline void fp8_blockwise_cast(
   NVTE_CHECK(block_m == block_n);
   NVTE_CHECK(N % block_n == 0);
 
-  const int block_x = (int)ceil_div(M, block_m);
-  const int block_y = (int)(N / block_n);
+  const int block_x = (int)(N / block_n);
+  const int block_y = (int)ceil_div(M, block_m);
   dim3 blocks(block_x, block_y);
 
   constexpr size_t VLEN = io_bytes / sizeof(IType);
-  const size_t full_threads = block_m * (block_n / VLEN);
-  const int threads = (int)(std::min(full_threads, max_threads_per_block));
-  NVTE_CHECK(threads % (int)wrap_size == 0);
+  const size_t thread_x = block_n / VLEN;
 
-  const size_t rounds = ceil_div(full_threads, (size_t)threads);
+  const size_t thread_y = std::min(block_m, max_threads_per_block / thread_x);
+  dim3 threads((int)(thread_x), (int)(thread_y));
+
+  const size_t n_threads = thread_x * thread_y;
+  NVTE_CHECK(n_threads % warp_size == 0);
+  const size_t n_warps = n_threads / warp_size;
+
+  const size_t rounds = ceil_div(block_m, thread_y);
   const size_t shm_trans = block_m * block_n * sizeof(CType);
-  const size_t shm_offsets = threads * rounds * sizeof(size_t);
+  const size_t shm_offsets = n_threads * rounds * sizeof(size_t);
   const size_t shm_total = shm_trans + shm_offsets;
 
-  fp8_nn_blockwise_n_to_1_kernel<Param, OP, IType, OType, CType, VLEN>
-      <<<blocks, threads, shm_total, stream>>>
-          (inp, noop, out, sinv, M, N, block_m, block_n, rounds, param);
+  if (thread_x == 32) {
+    fp8_nn_blockwise_n_to_1_kernel<Param, OP, IType, OType, CType, VLEN, 32>
+        <<<blocks, threads, shm_total, stream>>>
+            (inp, noop, out, sinv, M, N, block_m, block_n, rounds, n_warps, param);
+  } else if (thread_x == 16) {
+    fp8_nn_blockwise_n_to_1_kernel<Param, OP, IType, OType, CType, VLEN, 16>
+        <<<blocks, threads, shm_total, stream>>>
+            (inp, noop, out, sinv, M, N, block_m, block_n, rounds, n_warps, param);
+  } else {
+    fp8_nn_blockwise_n_to_1_kernel<Param, OP, IType, OType, CType, VLEN, 0>
+        <<<blocks, threads, shm_total, stream>>>
+            (inp, noop, out, sinv, M, N, block_m, block_n, rounds, n_warps, param);
+  }
 
   NVTE_CHECK_CUDA(musaGetLastError());
 }

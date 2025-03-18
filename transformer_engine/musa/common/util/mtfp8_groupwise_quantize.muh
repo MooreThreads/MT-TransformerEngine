@@ -33,17 +33,17 @@ __global__ void fp8_groupwise_1_to_n_kernel(
 
   extern __shared__ __align__(alignof(CType)) char temp[];
   const size_t tid = threadIdx.x;
-  const size_t wrap_id = tid / wrap_size;
-  const size_t lane_id = tid % wrap_size;
+  const size_t warp_id = tid / warp_size;
+  const size_t lane_id = tid % warp_size;
 
   const size_t groups_per_channel = N / group_size;
-  constexpr size_t elems_per_col = wrap_size * VLEN;
+  constexpr size_t elems_per_col = warp_size * VLEN;
   const size_t groups_per_col = elems_per_col / group_size;
-  const size_t groups_per_row = blockDim.x / wrap_size;
+  const size_t groups_per_row = blockDim.x / warp_size;
 
   auto* temp_base = reinterpret_cast<CVecT*>(temp);
 
-  const size_t dimx = blockIdx.x * groups_per_row + wrap_id;
+  const size_t dimx = blockIdx.x * groups_per_row + warp_id;
   const size_t sub_offset_y = lane_id * VLEN;
   const size_t dimy = blockIdx.y * elems_per_col + sub_offset_y;
 
@@ -108,21 +108,21 @@ inline void fp8_groupwise_cast(
   NVTE_CHECK(N % group_size == 0);
 
   constexpr size_t VLEN = io_bytes / sizeof(IType);
-  constexpr size_t elems_per_wrap = VLEN * wrap_size;
+  constexpr size_t elems_per_warp = VLEN * warp_size;
 
-  if (elems_per_wrap < group_size) {
+  if (elems_per_warp < group_size) {
     NVTE_ERROR("Not supported [1, ", group_size, "] blocksize for mtfp8 groupwise quantize.");
   } else {
-    if (elems_per_wrap % group_size != 0) {
+    if (elems_per_warp % group_size != 0) {
       NVTE_ERROR("Not supported [1, ", group_size, "] blocksize for mtfp8 groupwise quantize.");
     }
 
     const size_t thd_x = 8;
-    const size_t thd_y = wrap_size;
+    const size_t thd_y = warp_size;
     const size_t threads = thd_x * thd_y;
 
     const int blk_x = ceil_div(M, thd_x);
-    const int blk_y = ceil_div(N, elems_per_wrap);
+    const int blk_y = ceil_div(N, elems_per_warp);
     dim3 blocks(blk_x, blk_y);
 
     const size_t shm_trans = threads * VLEN * sizeof(CType);

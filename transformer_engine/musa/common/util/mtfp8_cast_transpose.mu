@@ -13,7 +13,7 @@ namespace mtfp8 {
 
 using CType = float;
 constexpr size_t warps_per_tile = 4;
-constexpr size_t block_size = wrap_size * warps_per_tile;
+constexpr size_t block_size = warp_size * warps_per_tile;
 
 namespace {
 
