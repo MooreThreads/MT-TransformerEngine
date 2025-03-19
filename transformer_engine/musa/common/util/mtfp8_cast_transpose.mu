@@ -85,7 +85,8 @@ __global__ void  mtfp8_cast_transpose_general_kernel(
 
     // 0, 1, 2, ..., 31
     // 128 * 128 * 2 / 1024 + 128 * BLOCK_SIZE_Y * 2 / 1024
-    __shared__ IType shm[GROUP_SIZE][NDWORD][GROUP_SIZE / NDWORD];
+    // __shared__ IType shm[GROUP_SIZE][NDWORD][GROUP_SIZE / NDWORD];
+    __shared__ IType shm[GROUP_SIZE][GROUP_SIZE];
     __shared__ IType shm_amax_columnwise[BLOCK_SIZE_Y][GROUP_SIZE + 2];
 
     float amax_rowwise;
@@ -99,46 +100,34 @@ __global__ void  mtfp8_cast_transpose_general_kernel(
     for (int loop_y_id = 0; loop_y_id < REPEAT_Y; loop_y_id++) {
       // assume no multiple loads along X dimension
 
+      // TODO: try prefetch
+
       int group_inner_y_id = loop_y_id * BLOCK_SIZE_Y * N_ELEMENTS_PER_THREAD_Y + local_row_base_id;
       // load input values into shared memory
       #pragma unroll
       for (int ii_y = 0; ii_y < N_ELEMENTS_PER_THREAD_Y; ii_y++) {
         amax_rowwise = 0.f;
-        int load_offset = global_row_base_id + group_inner_y_id + ii_y < nrows ?
-                          group_inner_y_id + ii_y :
-                          0;
-        tmp_load_reg.load_from(inp_load_ptr + load_offset * ncols, 0);
-
+        int ld_st_offset = global_row_base_id + group_inner_y_id + ii_y < nrows ?
+                           group_inner_y_id + ii_y:
+                           0;
+        *reinterpret_cast<input_vec_t*>(shm[group_inner_y_id + ii_y] + local_col_base_id) = *reinterpret_cast<const input_vec_t*>(inp_load_ptr + ld_st_offset * ncols);
+        tmp_load_reg.load_from(shm[group_inner_y_id + ii_y] + local_col_base_id, 0);
+        
         #pragma unroll
-        for (int ndword = 0; ndword < NDWORD; ndword++) {
-          #pragma unroll
-          for (int elm_id = 0; elm_id < ELEMENTS_PER_BANK; elm_id++) {
-            int offset = ndword * ELEMENTS_PER_BANK + elm_id;
-            IType value = tmp_load_reg.data.elt[offset];
-            shm[group_inner_y_id + ii_y][ndword][threadIdx.x * ELEMENTS_PER_BANK + elm_id] = value;
-            amax_rowwise = fmaxf(fmaxf(amax_rowwise, fabsf(value)), global_amax_min);
-            amax_columnwise[offset] = fmaxf(fmaxf(amax_columnwise[offset], fabsf(value)), global_amax_min);
-          }
+        for (int ii_x = 0; ii_x < N_ELEMENTS_PER_THREAD_X; ii_x++) {
+          amax_rowwise = fmaxf(fmaxf(amax_rowwise, fabsf(tmp_load_reg.data.elt[ii_x])), global_amax_min);
+          amax_columnwise[ii_x] = fmaxf(fmaxf(amax_columnwise[ii_x], fabsf(tmp_load_reg.data.elt[ii_x])), global_amax_min);
         }
 
         amax_rowwise = warpReduceMax(amax_rowwise) * (float)(Quantized_Limits<OType>::max_norm_rcp);
 
         //// write back to scale_inv and out_c [rowwise result]
-        int group_inner_y_offset = group_inner_y_id + ii_y;
-        int store_offset = global_row_base_id + group_inner_y_offset < nrows ?
-                            group_inner_y_offset :
-                            0;
-
-        for (int ndword = 0; ndword < NDWORD; ndword++) {
-          for (int elm_id = 0; elm_id < ELEMENTS_PER_BANK; elm_id++) {
-            int offset = ndword * ELEMENTS_PER_BANK + elm_id;
-            tmp_store_reg.data.elt[offset] = static_cast<OType>(float(shm[group_inner_y_offset][ndword][threadIdx.x * ELEMENTS_PER_BANK + elm_id]) / amax_rowwise);
-          }
+        for (int ii_x = 0; ii_x < N_ELEMENTS_PER_THREAD_X; ii_x++) {
+            tmp_store_reg.data.elt[ii_x] = static_cast<OType>(float(tmp_load_reg.data.elt[ii_x]) / amax_rowwise);
         }
-        tmp_store_reg.store_to(out_c_store_ptr + store_offset * ncols, 0);
+        tmp_store_reg.store_to(out_c_store_ptr + ld_st_offset * ncols, 0);
         if (threadIdx.x == 0) {
-          // rowwise_scale_inv_ptr[store_offset * rowwise_scale_inv_stride] = amax_rowwise[ii_y];
-          rowwise_scale_inv_ptr[store_offset * rowwise_scale_inv_stride] = amax_rowwise;
+          rowwise_scale_inv_ptr[ld_st_offset * rowwise_scale_inv_stride] = amax_rowwise;
         }
       }
 
@@ -149,32 +138,19 @@ __global__ void  mtfp8_cast_transpose_general_kernel(
 
     // RUN COLUMNWISE
 
-    __syncthreads();
+    __syncthreads_lm();
 
-    // TODO: optimize this
-    // N_ELEMENTS_PER_THREAD_X * blockDim.y times shared memory access
-    for (int ii = 0; ii < N_ELEMENTS_PER_THREAD_X; ii++) {
-      int col_offset = local_col_base_id + ii;
-      if (threadIdx.y == 0) {
-        amax_columnwise[ii] = shm_amax_columnwise[0][col_offset];
-        for (int kk = 1; kk < blockDim.y; kk++) {
-          amax_columnwise[ii] = 
-              fmaxf(amax_columnwise[ii], shm_amax_columnwise[kk][col_offset]);
+    for (int i = threadIdx.y; i < GROUP_SIZE; i += blockDim.y) {
+        IType amax = threadIdx.x < blockDim.y ? 
+                     shm_amax_columnwise[threadIdx.x][i] :
+                     (IType)0.f;
+        amax = warpReduceMax((float)amax);
+        if (threadIdx.x == 0) {
+          shm_amax_columnwise[0][i] = amax;
         }
-        shm_amax_columnwise[0][col_offset] = amax_columnwise[ii];
-      }
     }
 
-    // for (int i = threadIdx.y; i < GROUP_SIZE; i += blockDim.y) {
-    //     IType amax = threadIdx.x < blockDim.y ? 
-    //                  shm_amax_columnwise[threadIdx.x][i] :
-    //                  (IType)0.f;
-    //     amax = warpReduceMax(amax);
-    //     if (threadIdx.x < blockDim.y)
-    //       shm_amax_columnwise[threadIdx.x][i] = amax;
-    // }
-
-    __syncthreads();
+    __syncthreads_lm();
     #pragma unroll
     for (int ii = 0; ii < N_ELEMENTS_PER_THREAD_X; ii++) {
       amax_columnwise[ii] = (float)shm_amax_columnwise[0][local_col_base_id + ii] * (float)(Quantized_Limits<OType>::max_norm_rcp);
@@ -188,14 +164,10 @@ __global__ void  mtfp8_cast_transpose_general_kernel(
         int store_offset = (global_row_base_id + group_inner_y_offset) < nrows ?
                             group_inner_y_offset :
                             0;
-
-        for (int ndword = 0; ndword < NDWORD; ndword++) {
-          for (int elm_id = 0; elm_id < ELEMENTS_PER_BANK; elm_id++) {
-            int offset = ndword * ELEMENTS_PER_BANK + elm_id;
-            float scale_inv = amax_columnwise[offset];
-            float value = (float)shm[group_inner_y_offset][ndword][threadIdx.x * ELEMENTS_PER_BANK + elm_id] / scale_inv;
-            tmp_store_reg.data.elt[offset] = static_cast<OType>(value);
-          }
+        
+        for (int ii_x = 0; ii_x < N_ELEMENTS_PER_THREAD_X; ii_x++) {
+          float value = (float)shm[group_inner_y_offset][local_col_base_id + ii_x] / amax_columnwise[ii_x];
+          tmp_store_reg.data.elt[ii_x] = static_cast<OType>(value);
         }
         tmp_store_reg.store_to(out_t_store_ptr + store_offset * ncols, 0);
       }
@@ -207,7 +179,6 @@ __global__ void  mtfp8_cast_transpose_general_kernel(
       }
       scale_store_reg.store_to(columnwise_scale_inv_ptr, 0);
     }
-
 }
 
 
