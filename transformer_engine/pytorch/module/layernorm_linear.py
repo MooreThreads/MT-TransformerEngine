@@ -168,7 +168,11 @@ class _LayerNormLinear(torch.autograd.Function):
         elif with_quantized_norm:
             if with_input_all_gather:
                 input_quantizer.set_usage(rowwise=True, columnwise=False)
-            ln_out = input_quantizer.make_empty(inputmat.shape, dtype=inputmat.dtype, device="cuda")
+            # ln_out = input_quantizer.make_empty(inputmat.shape, dtype=inputmat.dtype, device="cuda")
+            # TODO (yehua.zhang) fuse rmsnorm + cast fp8
+            ln_out = torch.empty_like(
+                inputmat, dtype=inputmat.dtype, memory_format=torch.contiguous_format, device="cuda"
+            )
         else:
             ln_out = torch.empty_like(
                 inputmat, dtype=inputmat.dtype, memory_format=torch.contiguous_format, device="cuda"

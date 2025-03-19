@@ -30,7 +30,7 @@ def patch_after_import_torch():
         return tuple(new_args), kwargs
 
     torch.cuda.is_available = torch.musa.is_available
-    torch.cuda.current_device = lambda : f'musa:{torch.musa.current_device()}'
+    torch.cuda.current_device = torch.musa.current_device
     torch.cuda.device_count = torch.musa.device_count
     torch.cuda.set_device = torch.musa.set_device
     torch.cuda.DoubleTensor = torch.musa.DoubleTensor
@@ -98,6 +98,20 @@ def patch_after_import_torch():
         return result
     torch.rand = patched_rand
 
+    original_arange = torch.arange
+    def patched_arange(*args, **kwargs):
+        args, kwargs = maybe_hook_cuda_args(args, kwargs)
+        result = original_arange(*args, **kwargs)
+        return result
+    torch.arange = patched_arange
+
+    original_empty_like = torch.empty_like
+    def patched_empty_like(*args, **kwargs):
+        args, kwargs = maybe_hook_cuda_args(args, kwargs)
+        result = original_empty_like(*args, **kwargs)
+        return result
+    torch.empty_like = patched_empty_like
+
     original_is_cuda = torch.Tensor.is_cuda
     def always_cuda(self):
         return True
@@ -133,6 +147,15 @@ def patch_after_import_torch():
         args, kwargs = maybe_hook_cuda_args(args, kwargs)
         return origin_tensor_to(self, *args, **kwargs)
     torch.Tensor.to = patched_tensor_to
+
+    def get_default_device():
+        device = torch.device("musa", torch.musa.current_device())
+        return device
+    torch.get_default_device = get_default_device
+
+    def is_autocast_enabled(device_type=None):
+        return False
+    torch.is_autocast_enabled = is_autocast_enabled
 
     import os
     os.environ["NVTE_TORCH_COMPILE"] = "0"
