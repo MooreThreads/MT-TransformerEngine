@@ -17,13 +17,70 @@ template <
     typename OType,
     typename CType,
     size_t VLEN>
+__global__ void fp8_groupwise_1_to_1_kernel(
+    const IType* inp,
+    const CType* noop,
+    OType* out,
+    CType* sinv,
+    size_t numel,
+    Param param) {
+  if (noop != nullptr && noop[0] == 1.0f) return;
+  using IVecT = Vec<IType, VLEN>;
+  using CVecT = Vec<CType, VLEN>;
+  using OVecT = Vec<OType, VLEN>;
+
+  const size_t tid = threadIdx.y * blockDim.x + threadIdx.x;
+  const size_t warp_id = threadIdx.y;
+  const size_t lane_id = threadIdx.x;
+
+  const size_t data_offset = blockIdx.x * VLEN * blockDim.x * blockDim.y + tid * VLEN;
+  const size_t sinv_offset = blockIdx.x * blockDim.y + warp_id;
+
+  IVecT vec_in;
+  CType amax = 0;
+  CVecT vec_temp;
+  const bool valid = (data_offset < numel);
+  if (valid) {
+    vec_in.load_from(inp + data_offset, 0);
+#pragma unroll
+    for (size_t j = 0; j < VLEN; ++j) {
+      vec_temp.data.elt[j] = (CType)(OP((float)vec_in.data.elt[j], param));
+      amax = fmaxf(fabsf(vec_temp.data.elt[j]), amax);
+    }
+  }
+
+  amax = warp_reduce_max_broadcast(amax);
+  amax = fmaxf(amax, global_amax_min);
+  CType scale = (CType)(Quantized_Limits<OType>::max_norm) / amax;
+
+  OVecT vec_out;
+  if (valid) {
+#pragma unroll
+    for (size_t j = 0; j < VLEN; ++j) {
+      vec_out.data.elt[j] = (OType)(vec_temp.data.elt[j] * scale);
+    }
+    vec_out.store_to(out + data_offset, 0);
+  }
+
+  if (valid && lane_id == 0) {
+    *(sinv + sinv_offset) = amax * (CType)(Quantized_Limits<OType>::max_norm_rcp);
+  }
+}
+
+template <
+    typename Param,
+    float (*OP)(float, const Param &),
+    typename IType,
+    typename OType,
+    typename CType,
+    size_t VLEN>
 __global__ void fp8_groupwise_1_to_n_kernel(
     const IType* inp,
     const CType* noop,
     OType* out,
     CType* sinv,
-    size_t M,
-    size_t N,
+    size_t numel,
+    size_t groups_per_warp,
     size_t group_size,
     Param param) {
   if (noop != nullptr && noop[0] == 1.0f) return;
@@ -31,60 +88,50 @@ __global__ void fp8_groupwise_1_to_n_kernel(
   using CVecT = Vec<CType, VLEN>;
   using OVecT = Vec<OType, VLEN>;
 
-  extern __shared__ __align__(alignof(CType)) char temp[];
-  const size_t tid = threadIdx.x;
-  const size_t warp_id = tid / warp_size;
-  const size_t lane_id = tid % warp_size;
+  const size_t tid = threadIdx.y * blockDim.x + threadIdx.x;
+  const size_t warp_id = threadIdx.y;
+  const size_t lane_id = threadIdx.x;
 
-  const size_t groups_per_channel = N / group_size;
-  constexpr size_t elems_per_col = warp_size * VLEN;
-  const size_t groups_per_col = elems_per_col / group_size;
-  const size_t groups_per_row = blockDim.x / warp_size;
-
-  auto* temp_base = reinterpret_cast<CVecT*>(temp);
-
-  const size_t dimx = blockIdx.x * groups_per_row + warp_id;
-  const size_t sub_offset_y = lane_id * VLEN;
-  const size_t dimy = blockIdx.y * elems_per_col + sub_offset_y;
-
-  const size_t offset = dimx * N + dimy;
-  size_t amax_idx = sub_offset_y / group_size;
+  const size_t data_offset = blockIdx.x * VLEN * blockDim.x * blockDim.y + tid * VLEN;
+  const size_t lane_offset = lane_id * VLEN;
+  const size_t group_idx = lane_offset / group_size;
+  const size_t sinv_offset = (blockIdx.x * blockDim.y + warp_id) * groups_per_warp + group_idx;
+  const bool write_to_sinv = (lane_offset % group_size == 0);
 
   IVecT vec_in;
-  CVecT& tran = *(temp_base + tid);
   CType amax = 0;
-  const bool valid = (dimx < M && dimy < N);
+  CVecT vec_temp;
+  const bool valid = (data_offset < numel);
   if (valid) {
-    vec_in.load_from(inp + offset, 0);
+    vec_in.load_from(inp + data_offset, 0);
 #pragma unroll
     for (size_t j = 0; j < VLEN; ++j) {
-      tran.data.elt[j] = (CType)(OP((float)vec_in.data.elt[j], param));
-      amax = fmaxf(fabsf(tran.data.elt[j]), amax);
-      amax = fmaxf(amax, global_amax_min);
+      vec_temp.data.elt[j] = (CType)(OP((float)vec_in.data.elt[j], param));
+      amax = fmaxf(fabsf(vec_temp.data.elt[j]), amax);
     }
   }
 
-  for (size_t i = 0; i < groups_per_col; ++i) {
-    const bool flag = (i == amax_idx);
+  for (size_t i = 0; i < groups_per_warp; ++i) {
+    const bool flag = (i == group_idx);
     CType group_max = flag ? amax : 0;
     group_max = warp_reduce_max_broadcast(group_max);
     if (flag) {
       amax = group_max;
     }
   }
+  amax = fmaxf(amax, global_amax_min);
+  CType scale = (CType)(Quantized_Limits<OType>::max_norm) / amax;
 
   OVecT vec_out;
-  CType scale = (CType)(Quantized_Limits<OType>::max_norm) / amax;
   if (valid) {
 #pragma unroll
     for (size_t j = 0; j < VLEN; ++j) {
-      vec_out.data.elt[j] = (OType)(tran.data.elt[j] * scale);
+      vec_out.data.elt[j] = (OType)(vec_temp.data.elt[j] * scale);
     }
-    vec_out.store_to(out + offset, 0);
+    vec_out.store_to(out + data_offset, 0);
   }
 
-  if (valid && (sub_offset_y % group_size == 0)) {
-    const size_t sinv_offset = dimx * groups_per_channel + dimy / group_size;
+  if (valid && write_to_sinv) {
     *(sinv + sinv_offset) = amax * (CType)(Quantized_Limits<OType>::max_norm_rcp);
   }
 }
@@ -107,34 +154,58 @@ inline void fp8_groupwise_cast(
     musaStream_t stream) {
   NVTE_CHECK(N % group_size == 0);
 
+  const size_t numel = M * N;
+  constexpr size_t thd_x = warp_size;
+  constexpr size_t thd_y = max_threads_per_block / warp_size;
+  dim3 threads((int)thd_x, (int)thd_y);
+
+#define DISPATCH_1_TO_1(G, V)                                         \
+  if (group_size == G) {                                              \
+    constexpr size_t VLEN = V;                                        \
+    constexpr size_t elems_per_block = max_threads_per_block * VLEN;  \
+    const int blocks = (int)ceil_div(numel, elems_per_block);         \
+    fp8_groupwise_1_to_1_kernel<Param, OP, IType, OType, CType, VLEN> \
+        <<<blocks, threads, 0, stream>>>(                             \
+            inp, noop, out, sinv, numel, param);                      \
+    NVTE_CHECK_CUDA(musaGetLastError());                              \
+    return;                                                           \
+  }
+
+  if constexpr (sizeof(IType) == 2) {
+    DISPATCH_1_TO_1(32, 1);
+    DISPATCH_1_TO_1(64, 2);
+    DISPATCH_1_TO_1(128, 4);
+    DISPATCH_1_TO_1(256, 8);
+    NVTE_ERROR("Not supported [1, ", group_size, "] blocksize for mtfp8 groupwise quantize.");
+  } else if constexpr (sizeof(IType) == 4) {
+    DISPATCH_1_TO_1(32, 1);
+    DISPATCH_1_TO_1(64, 2);
+    DISPATCH_1_TO_1(128, 4);
+    DISPATCH_1_TO_1(256, 8);
+    NVTE_ERROR("Not supported [1, ", group_size, "] blocksize for mtfp8 groupwise quantize.");
+  }
+
+#undef DISPATCH_1_TO_1
+
   constexpr size_t VLEN = io_bytes / sizeof(IType);
   constexpr size_t elems_per_warp = VLEN * warp_size;
+  if (elems_per_warp % group_size == 0) {
+    constexpr size_t elems_per_block = max_threads_per_block * VLEN;
+    const int blocks = (int)ceil_div(numel, elems_per_block);
 
-  if (elems_per_warp < group_size) {
-    NVTE_ERROR("Not supported [1, ", group_size, "] blocksize for mtfp8 groupwise quantize.");
-  } else {
-    if (elems_per_warp % group_size != 0) {
-      NVTE_ERROR("Not supported [1, ", group_size, "] blocksize for mtfp8 groupwise quantize.");
-    }
+    const size_t groups_per_warp = elems_per_warp / group_size;
 
-    const size_t thd_x = 8;
-    const size_t thd_y = warp_size;
-    const size_t threads = thd_x * thd_y;
-
-    const int blk_x = ceil_div(M, thd_x);
-    const int blk_y = ceil_div(N, elems_per_warp);
-    dim3 blocks(blk_x, blk_y);
-
-    const size_t shm_trans = threads * VLEN * sizeof(CType);
-  
     fp8_groupwise_1_to_n_kernel<Param, OP, IType, OType, CType, VLEN>
-        <<<blocks, (int)threads, shm_trans, stream>>>(
-          inp, noop, out, sinv, M, N, group_size, param);
-
+        <<<blocks, threads, 0, stream>>>(
+            inp, noop, out, sinv, numel, groups_per_warp, group_size, param);
+  
     NVTE_CHECK_CUDA(musaGetLastError());
+    return;
   }
+
+  NVTE_ERROR("Not supported [1, ", group_size, "] blocksize for mtfp8 groupwise quantize.");
 }
 
 } // namespace transformer_engine::mtfp8
 
-#endif // TRANSFORMER_ENGINE_MUSA_COMMON_UTIL_MTFP8_GROUPWISE_QUANTIZE_MUH_
+#endif TRANSFORMER_ENGINE_MUSA_COMMON_UTIL_MTFP8_GROUPWISE_QUANTIZE_MUH_
