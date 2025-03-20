@@ -6,11 +6,13 @@ import torch_musa
 
 
 def patch_before_import_te():
+    from .pytorch import attention
     from .pytorch import tensor
     from .pytorch import fp8
     from .pytorch.module import base
     from .pytorch.ops import op
     from .pytorch.cpp_extensions import cast
+    from .pytorch.module import linear
 
 def patch_after_import_torch():
     def hook_cuda_device(device):
@@ -64,10 +66,12 @@ def patch_after_import_torch():
         return result
     torch.tensor = patched_tensor
 
-    orig_type = torch.Tensor.type
+    orig_type = torch.Tensor.type 
     def musa_type(*args, **kwargs):
         result = orig_type(*args, **kwargs)
-        return result.replace("musa", "cuda")
+        if isinstance(result, str):
+            result = result.replace("musa", "cuda")
+        return result
     torch.Tensor.type = musa_type
 
     original_zeros = torch.zeros
