@@ -25,5 +25,4 @@ for k in sys.modules:
     if 'utils' in k:
         for target in ['assert_dim_for_fp8_exec']:
             if getattr(sys.modules[k], target, None):
-                print(f'target is {target}')
                 setattr(sys.modules[k], target, musa_assert_dim_for_fp8_exec)
