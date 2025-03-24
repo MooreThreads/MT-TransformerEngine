@@ -74,7 +74,13 @@ from transformer_engine.pytorch.attention import DotProductAttention
 from transformer_engine.pytorch.attention import InferenceParams
 from transformer_engine.pytorch.attention import MultiheadAttention
 from transformer_engine.pytorch.transformer import TransformerLayer
-from transformer_engine.pytorch.permutation import moe_permute, moe_unpermute
+from transformer_engine.pytorch.permutation import (
+    moe_permute,
+    moe_permute_with_probs,
+    moe_unpermute,
+    moe_sort_chunks_by_index,
+    moe_sort_chunks_by_index_with_probs,
+)
 from transformer_engine.pytorch.fp8 import fp8_autocast
 from transformer_engine.pytorch.fp8 import fp8_model_init
 from transformer_engine.pytorch.graph import make_graphed_callables
@@ -83,6 +89,7 @@ from transformer_engine.pytorch.distributed import CudaRNGStatesTracker
 from transformer_engine.pytorch.cpu_offload import get_cpu_offload_context
 from transformer_engine.pytorch import ops
 from transformer_engine.pytorch import optimizers
+from transformer_engine.pytorch.cross_entropy import parallel_cross_entropy
 
 try:
     torch._dynamo.config.error_on_nested_jit_trace = False

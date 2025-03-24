@@ -13,6 +13,7 @@ def patch_before_import_te():
     from .pytorch.ops import op
     from .pytorch.cpp_extensions import cast
     from .pytorch.module import linear
+    from .pytorch import utils
 
 def patch_after_import_torch():
     def hook_cuda_device(device):
@@ -53,6 +54,9 @@ def patch_after_import_torch():
     torch.cuda.current_stream = torch.musa.current_stream
     torch.cuda.set_stream = torch.musa.set_stream
     torch.cuda.get_device_properties = torch.musa.get_device_properties
+    # add torch.musa.current_devce() to activate torch.musa.default_generators
+    d = torch.musa.current_device()
+    torch.cuda.default_generators = torch.musa.default_generators
 
     torch.cuda.memory_allocated = torch.musa.memory_allocated
     torch.cuda.max_memory_allocated = torch.musa.memory_allocated

@@ -7507,6 +7507,9 @@ class DotProductAttention(TransformerEngineBaseModule):
                 fused_attention_backend = _attention_backends["fused_attention_backend"]
                 use_unfused_attention = _attention_backends["use_unfused_attention"]
 
+            # TODO(yehua.zhang) delete the use_flash_attention = True 
+            use_flash_attention = True 
+
             if use_flash_attention:
                 if core_attention_bias_type == "alibi":
                     alibi_slopes, _ = get_alibi(

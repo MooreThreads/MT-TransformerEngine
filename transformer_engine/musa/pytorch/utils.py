@@ -16,8 +16,14 @@ def wrap_attr(module, name, wrapper):
 def replace_attr(module, name, target):
     wrap_attr(module, name, target)
 
-def assert_dim_for_fp8_exec(*tensors: List[torch.Tensor]) -> None:
-    return
 
-from transformer_engine.pytorch import utils
-replace_attr(utils, "assert_dim_for_fp8_exec", assert_dim_for_fp8_exec)
+def musa_assert_dim_for_fp8_exec(*tensors: List[torch.Tensor]) -> None:
+    return
+# TODO(yehua.zhang) do not work
+import sys
+for k in sys.modules:
+    if 'utils' in k:
+        for target in ['assert_dim_for_fp8_exec']:
+            if getattr(sys.modules[k], target, None):
+                print(f'target is {target}')
+                setattr(sys.modules[k], target, musa_assert_dim_for_fp8_exec)

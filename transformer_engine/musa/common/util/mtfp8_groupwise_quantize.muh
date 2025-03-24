@@ -208,4 +208,4 @@ inline void fp8_groupwise_cast(
 
 } // namespace transformer_engine::mtfp8
 
-#endif TRANSFORMER_ENGINE_MUSA_COMMON_UTIL_MTFP8_GROUPWISE_QUANTIZE_MUH_
+#endif // TRANSFORMER_ENGINE_MUSA_COMMON_UTIL_MTFP8_GROUPWISE_QUANTIZE_MUH_
