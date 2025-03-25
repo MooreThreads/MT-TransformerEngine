@@ -1,5 +1,6 @@
 from pydantic.dataclasses import dataclass
 from typing import Tuple, Optional, Dict, Any
+import os
 
 import torch, torch_musa
 
@@ -12,6 +13,7 @@ from transformer_engine.pytorch.fp8 import (
     RecipeState,
     get_fp8_te_dtype,
     FP8GlobalStateManager,
+    DelayedScaling
 )
 from .tensor.mtfp8_tensor import (
     MTFP8Quantizer,
@@ -89,10 +91,15 @@ class MTFP8BlockScalingRecipeState(RecipeState):
 
         if mode == "forward":
             assert num_quantizers % 3 == 0
-            self.blocks = [activation_blocks, weight_blocks, activation_blocks]
+            n_gemms = self.num_quantizers // 3
+            self.blocks = [activation_blocks] * n_gemms
+            self.blocks += [weight_blocks] * n_gemms
+            self.blocks += [activation_blocks] * n_gemms
         else:
             assert num_quantizers % 2 == 0
-            self.blocks = [activation_blocks] * 2
+            n_gemms = self.num_quantizers // 2
+            self.blocks = [activation_blocks] * n_gemms
+            self.blocks += [activation_blocks] * n_gemms
 
         if device is None:
             device = torch.device("musa")
@@ -161,6 +168,11 @@ def musa_restore_fp8_meta_tensors(fp8_meta: Dict[str, Any]) -> None:
         return
     FP8GlobalStateManager._orig_restore_fp8_meta_tensors(fp8_meta)
 
+def musa_get_default_fp8_recipe() -> Recipe:
+    """FP8 recipe with default args."""
+    if not os.getenv("FP8_PER_TENSOR", True):
+        return MTFP8BlockScaling()
+    return DelayedScaling()
 
 def pytorch_fp8_workaround():
     from transformer_engine.pytorch import fp8
@@ -187,4 +199,6 @@ def pytorch_fp8_workaround():
         "restore_fp8_meta_tensors",
         musa_restore_fp8_meta_tensors,
     )
+    replace_attr(fp8, "get_default_fp8_recipe", musa_get_default_fp8_recipe)
+
 pytorch_fp8_workaround()
