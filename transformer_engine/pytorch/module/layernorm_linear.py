@@ -58,7 +58,7 @@ from ..cpu_offload import is_cpu_offload_enabled, set_offloading_param
 from ..cpp_extensions import (
     general_gemm,
 )
-
+from .. import cpp_extensions as ceg
 __all__ = ["LayerNormLinear"]
 
 
@@ -608,7 +608,7 @@ class _LayerNormLinear(torch.autograd.Function):
 
                 # wgrad GEMM
                 # Note: Fuse with bgrad computation if needed
-                wgrad, grad_bias_, *_, rs_out = general_gemm(
+                wgrad, grad_bias_, *_, rs_out = ceg.general_gemm(
                     ln_out_total,
                     grad_output,
                     get_workspace(),
@@ -637,10 +637,11 @@ class _LayerNormLinear(torch.autograd.Function):
                     grad_bias = grad_bias_
                 del grad_bias_
 
-                # Deallocate input tensor
-                if not ctx.return_layernorm_output:
-                    # TODO (pgadzinski) - deallocate transpose only  # pylint: disable=fixme
-                    clear_tensor_data(ln_out_total)
+                if os.getenv("ENABLE_ZERO_BUBBLE", "0") == "0":
+                    # Deallocate input tensor
+                    if not ctx.return_layernorm_output:
+                        # TODO (pgadzinski) - deallocate transpose only  # pylint: disable=fixme
+                        clear_tensor_data(ln_out_total)
 
             # Don't return grad bias if not needed
             if not ctx.use_bias:

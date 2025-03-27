@@ -3,6 +3,7 @@
 # See LICENSE for license information.
 
 """Linear API"""
+import os
 from typing import Callable, Dict, Optional, Tuple, Union
 from functools import reduce
 from operator import mul as multiply_op
@@ -43,6 +44,7 @@ from ..distributed import (
 from ..cpp_extensions import (
     general_gemm,
 )
+from .. import cpp_extensions as ceg
 from ..constants import GemmParallelModes, dist_group_type
 from ..jit import no_torch_dynamo
 from ..graph import is_graph_capturing
@@ -516,7 +518,7 @@ class _Linear(torch.autograd.Function):
 
                 # wgrad GEMM
                 # Note: Fuse with bgrad computation if needed
-                wgrad, grad_bias_, _, rs_out = general_gemm(
+                wgrad, grad_bias_, _, rs_out = ceg.general_gemm(
                     inputmat_total,
                     grad_output,
                     get_workspace(),
@@ -545,9 +547,10 @@ class _Linear(torch.autograd.Function):
                     grad_bias = grad_bias_
                 del grad_bias_
 
-                # Deallocate input tensor
-                if ctx.owns_input:
-                    clear_tensor_data(inputmat_total)
+                # # Deallocate input tensor
+                if os.getenv("ENABLE_ZERO_BUBBLE", "0") == "0":
+                    if ctx.owns_input:
+                        clear_tensor_data(inputmat_total)
 
             # Don't return grad bias if not needed
             if not ctx.use_bias:

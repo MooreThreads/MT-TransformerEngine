@@ -39,6 +39,7 @@ from transformer_engine.pytorch.tensor.quantized_tensor import (
     restore_from_saved,
 )
 
+from transformer_engine.pytorch import cpp_extensions as ceg
 from transformer_engine.pytorch.cpp_extensions import (
     general_gemm,
 )
@@ -500,7 +501,7 @@ def backward_custom(self, inp, grad_output, is_first_microbatch=None, fp8_output
 
             # wgrad GEMM
             # Note: Fuse with bgrad computation if needed
-            wgrad, grad_bias_, _, rs_out = general_gemm(
+            wgrad, grad_bias_, _, rs_out = ceg.general_gemm(
                 inputmat_total,
                 grad_output,
                 get_workspace(),
@@ -530,8 +531,9 @@ def backward_custom(self, inp, grad_output, is_first_microbatch=None, fp8_output
             del grad_bias_
 
             # Deallocate input tensor
-            if owns_input:
-                clear_tensor_data(inputmat_total)
+            if os.getenv("ENABLE_ZERO_BUBBLE", "0") == "0":
+                if owns_input:
+                    clear_tensor_data(inputmat_total)
 
         # Don't return grad bias if not needed
         if not use_bias:

@@ -3,6 +3,7 @@
 # See LICENSE for license information.
 
 """GroupedLinear API"""
+import os
 from typing import Union, Optional, Callable, Tuple, List
 
 import torch
@@ -25,6 +26,8 @@ from transformer_engine.pytorch.distributed import (
     is_fp8_activation_recompute_enabled,
     in_fp8_activation_recompute_phase,
 )
+from transformer_engine.pytorch import cpp_extensions as ceg
+
 from transformer_engine.pytorch.cpp_extensions import (
     general_grouped_gemm,
 )
@@ -241,7 +244,7 @@ def backward_custom(self, inp, m_splits, grad_output: torch.Tensor, is_first_mic
                     for w in weights
                 ]
             # WGRAD
-            _, grad_biases_, _ = general_grouped_gemm(
+            _, grad_biases_, _ = ceg.general_grouped_gemm(
                 inputmats,
                 grad_output,
                 wgrad_list,
@@ -260,8 +263,9 @@ def backward_custom(self, inp, m_splits, grad_output: torch.Tensor, is_first_mic
                     grad_biases[i] = grad_biases_[i]
             del grad_biases_
 
-            # Deallocate input tensor
-            clear_tensor_data(*inputmats)
+            if os.getenv("ENABLE_ZERO_BUBBLE", "0") == "0":
+                # Deallocate input tensor
+                clear_tensor_data(*inputmats)
 
             def handle_custom_ddp_from_mcore(w, wgrad):
                 if weights_requires_grad:
