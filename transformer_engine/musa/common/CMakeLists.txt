@@ -102,6 +102,7 @@ list(APPEND transformer_engine_SOURCES
   fused_softmax/scaled_upper_triang_masked_softmax.mu
   gemm/mudnn_gemm.cpp
   permutation/permutation.mu
+  permutation/permutation_mask.mu
   recipe/delayed_scaling.mu
   swizzle/swizzle.mu
   transpose/multi_cast_transpose.mu

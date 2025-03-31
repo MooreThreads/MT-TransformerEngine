@@ -49,8 +49,10 @@ def _row_id_map_pass_1_kernel(
 def _row_id_map_pass_2_kernel(
     # pointers
     row_id_map_ptr,
+    row_id_map_non_trans_ptr,
     workspace_ptr,
     # sizes
+    num_experts,
     num_tokens,
     # metas
     WORKSPACE_LOAD_WIDTH: tl.constexpr,
@@ -76,6 +78,11 @@ def _row_id_map_pass_2_kernel(
         row_id,
         mask=(offset < num_tokens),
     )
+    tl.store(
+        row_id_map_non_trans_ptr + offset * num_experts + pid_m,
+        row_id,
+        mask=(offset < num_tokens),
+    )
 
 
 def make_row_id_map(
@@ -85,6 +92,7 @@ def make_row_id_map(
 ):
     # pylint: disable=missing-function-docstring
     row_id_map = torch.empty((num_experts, num_tokens), dtype=torch.int64, device="cuda")
+    row_id_map_non_trans = torch.empty((num_tokens, num_experts), dtype=torch.int64, device="cuda")
     block_size = 256
     grid = (num_experts, triton.cdiv(num_tokens, block_size))
     workspace_tensor = torch.empty(grid, dtype=torch.int64, device="cuda")
@@ -101,12 +109,14 @@ def make_row_id_map(
     # cumsum all and process the mask
     _row_id_map_pass_2_kernel[grid](
         row_id_map,
+        row_id_map_non_trans,
         workspace_tensor,
+        num_experts,
         num_tokens,
         triton.next_power_of_2(num_experts * triton.cdiv(num_tokens, block_size)),
         block_size,
     )
-    return row_id_map
+    return row_id_map, row_id_map_non_trans
 
 
 @triton.jit

@@ -66,4 +66,14 @@
   do {                                                                           \
   } while (false)
 
+#define NVTE_CHECK_MU(expr)                       \
+  do {                                            \
+    MUresult status = (expr);                     \
+    if (status != MUSA_SUCCESS) {                 \
+      const char* err_str;                        \
+      muGetErrorString(status, &err_str);         \
+      NVTE_ERROR("musa driver Error: ", err_str); \
+    }                                             \
+  } while (false)
+
 #endif  // TRANSFORMER_ENGINE_COMMON_UTIL_LOGGING_H_

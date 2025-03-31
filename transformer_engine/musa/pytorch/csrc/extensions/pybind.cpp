@@ -161,6 +161,11 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
   m.def("moe_unpermute_fwd", moe_unpermute_fwd);
   m.def("moe_unpermute_bwd", moe_unpermute_bwd);
 
+  // Permutation with mask functions
+  m.def("moe_permute_mask", moe_permute_mask);
+  m.def("moe_unpermute_mask", moe_unpermute_mask);
+  m.def("moe_unpermute_mask_bwd_with_merging_probs", moe_unpermute_mask_bwd_with_merging_probs);
+
   // Softmax functions
   m.def("scaled_softmax_forward", &scaled_softmax_forward, "Scaled Softmax FWD",
         py::call_guard<py::gil_scoped_release>());

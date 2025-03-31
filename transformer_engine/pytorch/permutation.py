@@ -280,7 +280,7 @@ class _moe_permute_mask_map(torch.autograd.Function):
             num_out_tokens is not None
         ), "num_out_tokens must be provided to the fused permute function."
 
-        row_id_map = triton_permutation.make_row_id_map(routing_map, num_tokens, num_experts)
+        row_id_map, row_id_map_non_trans = triton_permutation.make_row_id_map(routing_map, num_tokens, num_experts)
 
         fp8 = isinstance(inp, Float8Tensor)
         if fp8:
@@ -288,15 +288,31 @@ class _moe_permute_mask_map(torch.autograd.Function):
             fp8_scale_inv = inp._scale_inv
             fake_dtype = inp.dtype
             inp = inp._data
-        output, permuted_probs = triton_permutation.permute_with_mask_map(
-            inp,
-            row_id_map,
-            probs,
-            num_tokens,
-            num_experts,
-            num_out_tokens,
-            hidden_size,
-        )
+
+        if not fp8 and num_experts % 4 == 0:
+            dtype = TE_DType[inp.dtype]
+            if probs is None:
+                probs = torch.empty(0)
+            output, permuted_probs = tex.moe_permute_mask(
+                dtype,
+                inp,
+                row_id_map_non_trans,
+                probs,
+                num_tokens,
+                num_experts,
+                num_out_tokens,
+                hidden_size,
+            )
+        else:
+            output, permuted_probs = triton_permutation.permute_with_mask_map(
+                inp,
+                row_id_map,
+                probs,
+                num_tokens,
+                num_experts,
+                num_out_tokens,
+                hidden_size,
+            )
         if fp8:
             output = Float8Tensor(
                 data=output,
@@ -335,16 +351,32 @@ class _moe_permute_mask_map(torch.autograd.Function):
                 permuted_act_grad = permuted_act_grad._data
             else:
                 fp8_dtype = None
-            act_grad, probs_grad = triton_permutation.unpermute_with_mask_map(
-                permuted_act_grad,
-                row_id_map,
-                None,
-                permuted_probs_grad,
-                ctx.num_tokens,
-                ctx.num_experts,
-                ctx.hidden_size,
-                fp8_dtype,
-            )
+
+            if not fp8 and ctx.num_experts % 4 == 0:
+                dtype = TE_DType[permuted_act_grad.dtype]
+                if permuted_probs_grad is None:
+                    permuted_probs_grad = torch.empty(0)
+                act_grad, probs_grad = tex.moe_unpermute_mask(
+                    dtype,
+                    permuted_act_grad,
+                    row_id_map,
+                    torch.empty(0),
+                    permuted_probs_grad,
+                    ctx.num_tokens,
+                    ctx.num_experts,
+                    ctx.hidden_size,
+                )
+            else:
+                act_grad, probs_grad = triton_permutation.unpermute_with_mask_map(
+                    permuted_act_grad,
+                    row_id_map,
+                    None,
+                    permuted_probs_grad,
+                    ctx.num_tokens,
+                    ctx.num_experts,
+                    ctx.hidden_size,
+                    fp8_dtype,
+                )
             if fp8:
                 act_grad = Float8Tensor(
                     data=act_grad,
@@ -398,16 +430,29 @@ class _moe_unpermute_mask_map(torch.autograd.Function):
             inp = inp._data
         else:
             fp8_dtype = None
-        unpermuted_output, _ = triton_permutation.unpermute_with_mask_map(
-            inp,
-            row_id_map,
-            merging_probs,
-            None,
-            num_tokens,
-            num_experts,
-            hidden_size,
-            fp8_dtype=fp8_dtype,
-        )
+        if not fp8 and num_experts % 4 == 0:
+            dtype = TE_DType[inp.dtype]
+            unpermuted_output, _ = tex.moe_unpermute_mask(
+                dtype,
+                inp,
+                row_id_map,
+                merging_probs,
+                torch.empty(0),
+                num_tokens,
+                num_experts,
+                hidden_size,
+            )
+        else:
+            unpermuted_output, _ = triton_permutation.unpermute_with_mask_map(
+                inp,
+                row_id_map,
+                merging_probs,
+                None,
+                num_tokens,
+                num_experts,
+                hidden_size,
+                fp8_dtype=fp8_dtype,
+            )
         if fp8:
             unpermuted_output = Float8Tensor(
                 data=unpermuted_output,
@@ -452,29 +497,58 @@ class _moe_unpermute_mask_map(torch.autograd.Function):
                 fp8_dtype = None
 
             if ctx.with_probs:
-                act_grad, probs_grad = (
-                    triton_permutation.unpermute_with_mask_map_bwd_with_merging_probs(
+                if not fp8 and ctx.num_experts % 4 == 0:
+                    dtype = TE_DType[unpermuted_act_grad.dtype]
+                    act_grad, probs_grad = (
+                        tex.moe_unpermute_mask_bwd_with_merging_probs(
+                            dtype,
+                            unpermuted_act_grad,
+                            fwd_input,
+                            merging_probs,
+                            row_id_map,
+                            ctx.num_tokens,
+                            ctx.num_experts,
+                            ctx.num_permuted_tokens,
+                            ctx.hidden_size,
+                        )
+                    )
+                else:
+                    act_grad, probs_grad = (
+                        triton_permutation.unpermute_with_mask_map_bwd_with_merging_probs(
+                            unpermuted_act_grad,
+                            row_id_map,
+                            fwd_input,
+                            merging_probs,
+                            ctx.num_tokens,
+                            ctx.num_experts,
+                            ctx.num_permuted_tokens,
+                            ctx.hidden_size,
+                            fp8_dtype,
+                        )
+                    )
+            else:
+                if not fp8 and num_experts % 4 == 0:
+                    dtype = TE_DType[inp.dtype]
+                    act_grad, _ = tex.moe_permute_mask(
+                        dtype,
                         unpermuted_act_grad,
                         row_id_map,
-                        fwd_input,
-                        merging_probs,
+                        torch.empty(0),
                         ctx.num_tokens,
                         ctx.num_experts,
                         ctx.num_permuted_tokens,
                         ctx.hidden_size,
-                        fp8_dtype,
                     )
-                )
-            else:
-                act_grad, _ = triton_permutation.permute_with_mask_map(
-                    unpermuted_act_grad,
-                    row_id_map,
-                    None,
-                    ctx.num_tokens,
-                    ctx.num_experts,
-                    ctx.num_permuted_tokens,
-                    ctx.hidden_size,
-                )
+                else:
+                    act_grad, _ = triton_permutation.permute_with_mask_map(
+                        unpermuted_act_grad,
+                        row_id_map,
+                        None,
+                        ctx.num_tokens,
+                        ctx.num_experts,
+                        ctx.num_permuted_tokens,
+                        ctx.hidden_size,
+                    )
 
             if fp8:
                 act_grad = Float8Tensor(
