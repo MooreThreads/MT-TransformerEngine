@@ -74,7 +74,7 @@ void mtfp8_dequantize(const Tensor* input, Tensor* output, musaStream_t stream) 
         const auto sinv_n = input->scale_inv.shape[1];
 
         size_t block_m = 1;
-        const size_t block_n = (N / sinv_n);
+        const size_t block_n = 128; //(N / sinv_n);
         if (M != sinv_m) {
           block_m = block_n;
         }

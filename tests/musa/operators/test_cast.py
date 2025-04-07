@@ -209,7 +209,24 @@ def composite_groupwise_cast(src, group_size, dst_dtype):
 
 
 def composite_groupwise_uncast(x, sinv, group_size, src_dtype):
+    # import pdb; pdb.set_trace();
     orig_shape = x.shape
+    res = ((x.reshape(-1, group_size)) * (sinv.reshape(-1, 1))).to(src_dtype)
+    return res.reshape(orig_shape)
+
+
+def composite_groupwise_uncast_for_cast_transpose(x, sinv, group_size, src_dtype):
+    orig_shape = x.shape
+    padded_num = sinv.size(-1) * group_size - orig_shape[-1]
+    if padded_num:
+        new_shape = list(orig_shape); new_shape[-1] = sinv.size(-1) * group_size
+        padded_tensor_shape = list(orig_shape); padded_tensor_shape[-1] = padded_num
+        padded_tensor = torch.zeros(padded_tensor_shape, dtype=x.dtype, device=x.device)
+        _x = torch.cat([x, padded_tensor], dim=-1)
+        res = (_x.reshape(-1, sinv.size(-1), group_size) * sinv.unsqueeze(-1)).to(src_dtype)
+        
+        return res.reshape(new_shape)[..., :orig_shape[-1]]
+
     res = ((x.reshape(-1, group_size)) * (sinv.reshape(-1, 1))).to(src_dtype)
     return res.reshape(orig_shape)
 
@@ -280,6 +297,9 @@ def test_mtfp8_groupwise_cast_to_fp8(shape, src_dtype, dst_dtype):
     [[230, 128], 128],
     # [[16384, 65536], 128],  # for benchmark
     # [[16383, 65536], 128],  # for benchmark
+    
+    # K-dim unaligned cases
+    [[4096, 576], 128],
 ])
 @pytest.mark.parametrize("src_dtype", [
     torch.bfloat16,
@@ -327,7 +347,8 @@ def test_mtfp8_groupwise_cast_transpose(shape, src_dtype, dst_dtype):
     assert torch.allclose(dst_rowwise_golden.to(torch.float32), musa_dst._rowwise_data.view(dst_dtype).to(torch.float32), atol=1e-4, rtol=1e-4)
     assert torch.allclose(dst_columnwise_golden.to(torch.float32), musa_dst._columnwise_data.view(dst_dtype).to(torch.float32), atol=1e-4, rtol=1e-4)
 
-    gold_deq = composite_groupwise_uncast(dst_rowwise_golden.float(), scale_inv_rowwise_golden, group_size, src_dtype)
+    # still failed in K-dim unaligned cases
+    gold_deq = composite_groupwise_uncast_for_cast_transpose(dst_rowwise_golden.float(), scale_inv_rowwise_golden, group_size, src_dtype)
     musa_deq = musa_dst.dequantize()
     assert musa_deq.dtype == src_dtype
     assert torch.equal(musa_deq, gold_deq)
@@ -341,17 +362,14 @@ def _gen_mtfp8_groupwise_cast_transpose_golden(input_tensor, group_size, dst_dty
     ngroup_col = ncols // group_size
     ngroup_row = nrows // group_size
 
-    # block-wise scaling along column
-    # we assume always aligned on channels's dimension
-    tmp01 = input_tensor_tmp.reshape(nrows, ngroup_col, group_size).to(torch.float32)
-    amax = torch.abs(tmp01).max(-1, keepdim=True)[0]
-    amax = amax.clamp(1e-4)
-    scale_inv = amax / fp_max
-    dst_rowwise = (tmp01 / scale_inv).to(dst_dtype).reshape(-1, ncols)
-    scale_inv_rowwise = scale_inv.reshape(nrows, ngroup_col)
-
-    if (nrows % group_size == 0):
-        # ALIGNED CASE
+    if ((nrows % group_size == 0) and (ncols % group_size == 0)):
+        # block-wise scaling along column
+        tmp01 = input_tensor_tmp.reshape(nrows, ngroup_col, group_size).to(torch.float32)
+        amax = torch.abs(tmp01).max(-1, keepdim=True)[0]
+        amax = amax.clamp(1e-4)
+        scale_inv = amax / fp_max
+        dst_rowwise = (tmp01 / scale_inv).to(dst_dtype).reshape(-1, ncols)
+        scale_inv_rowwise = scale_inv.reshape(nrows, ngroup_col)
 
         # block-wise scaling along row
         tmp02 = input_tensor_tmp.reshape(ngroup_row, group_size, ncols).to(torch.float32)
@@ -360,8 +378,20 @@ def _gen_mtfp8_groupwise_cast_transpose_golden(input_tensor, group_size, dst_dty
         scale_inv = amax / fp_max
         dst_columnwise = (tmp02 / scale_inv).to(dst_dtype).reshape(-1, ncols)
         scale_inv_columnwise = scale_inv.reshape(ngroup_row, ncols)
-    else:
-        # NON-ALIGNED CASE
+
+    elif ((nrows % group_size != 0) and (ncols % group_size != 0)):
+        # both unaligned cases seems rare
+        raise NotImplementedError
+    elif (nrows % group_size != 0):
+        # block-wise scaling along column
+        tmp01 = input_tensor_tmp.reshape(nrows, ngroup_col, group_size).to(torch.float32)
+        amax = torch.abs(tmp01).max(-1, keepdim=True)[0]
+        amax = amax.clamp(1e-4)
+        scale_inv = amax / fp_max
+        dst_rowwise = (tmp01 / scale_inv).to(dst_dtype).reshape(-1, ncols)
+        scale_inv_rowwise = scale_inv.reshape(nrows, ngroup_col)
+
+        # block-wise scaling along row 
         tmp02 = input_tensor_tmp.to(torch.float32)
         nrows_padded = ((nrows + group_size - 1) // group_size) * group_size
         ngroup_row_new = nrows_padded // group_size
@@ -375,7 +405,29 @@ def _gen_mtfp8_groupwise_cast_transpose_golden(input_tensor, group_size, dst_dty
         scale_inv_columnwise = scale_inv.reshape(ngroup_row_new, ncols)
 
         dst_columnwise = dst_columnwise[:nrows, ...]
+    # elif (ncols % group_size != 0):
+    else:
+        # block-wise scaling along column
+        tmp01 = input_tensor_tmp.to(torch.float32)
+        ncols_padded = ((ncols + group_size - 1) // group_size) * group_size
+        ngroup_col_new = ncols_padded // group_size
+        padding_tensor = torch.zeros(nrows, (ncols_padded - ncols), dtype=torch.float32, device=tmp01.device)
+        padded_tensor = torch.cat([tmp01, padding_tensor], -1)
+        padded_tensor_reshaped = padded_tensor.reshape(nrows, ngroup_col_new, group_size)
+        amax = torch.abs(padded_tensor_reshaped).max(-1, keepdim=True)[0]
+        amax = amax.clamp(1e-4)
+        scale_inv = amax / fp_max
+        dst_rowwise = (padded_tensor_reshaped / scale_inv).to(dst_dtype).reshape(nrows, -1)
+        scale_inv_rowwise = scale_inv.reshape(nrows, ngroup_col_new)
+        dst_rowwise  = dst_rowwise[..., :ncols]
 
+        # block-wise scaling along row
+        tmp02 = input_tensor_tmp.reshape(ngroup_row, group_size, ncols).to(torch.float32)
+        amax = torch.abs(tmp02).max(1, keepdim=True)[0]
+        amax = amax.clamp(1e-4)
+        scale_inv = amax / fp_max
+        dst_columnwise = (tmp02 / scale_inv).to(dst_dtype).reshape(-1, ncols)
+        scale_inv_columnwise = scale_inv.reshape(ngroup_row, ncols)
 
     return dst_rowwise, scale_inv_rowwise, dst_columnwise, scale_inv_columnwise
 
