@@ -307,7 +307,8 @@ py::object CommOverlapP2P::get_buffer(py::handle quantizer, bool local_chunk,
     torch_shape = {output_c_dim0, output_c_dim1};
   }
   auto ubuf_tensor = torch::from_blob(reinterpret_cast<void *>(ubuf_wt_ptr), torch_shape,
-                                      at::dtype(GetATenDType(_ubuf.dtype())).device(torch::kCUDA));
+                                      at::dtype(GetATenDType(_ubuf.dtype())).device(
+                                      c10::DeviceType::PrivateUse1, static_cast<c10::DeviceIndex>(_tp_id)));;
 
   std::unique_ptr<Quantizer> my_quantizer = convert_quantizer(quantizer);
   std::vector<size_t> te_shape;

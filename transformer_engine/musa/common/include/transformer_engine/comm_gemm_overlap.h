@@ -17,6 +17,17 @@
 
 #define NVTE_COMM_OVERLAP_MAX_STREAMS 3
 
+// Index corresponds to the type of flag:
+// 0 - Receive index counter
+// 1 - CE start index counter
+// 2 - CE end index counter
+#define GET_RECV_PTR_BY_INDEX(recv_peer, comm, dsth, index)                              \
+  ((reinterpret_cast<char *>((comm)->mem_ptr[0])) +                                      \
+   ((NVTE_REG0_OFFSET(comm) + NVTE_REG0_RECV + (recv_peer) * NVTE_MAX_REGIONS + (dsth) + \
+     (index) * NVTE_MAX_NVLINK * NVTE_MAX_REGIONS) *                                     \
+    sizeof(int)))
+
+
 namespace transformer_engine {
 
 /* \brief Check if Userbufers bootstraps with direct calls to MPI collectives.
@@ -218,7 +229,8 @@ class CommOverlapP2PBase : public CommOverlapCore {
   std::vector<TensorWrapper> _ubufs;
   std::vector<musaStream_t> _stream_send;
   musaStream_t _stream_recv;
-  musaEvent_t _stop_send, _stop_recv;
+  musaStream_t _stream_comm_ce;
+  musaEvent_t _stop_send, _stop_recv, _stop_comm;
 
  public:
   CommOverlapP2PBase() {}  // dummy constructor for exposing type to Python

@@ -777,14 +777,19 @@ CommOverlapP2PBase::CommOverlapP2PBase(const std::vector<size_t> &buffer_shape, 
   }
   NVTE_CHECK_CUDA(
       musaStreamCreateWithPriority(&_stream_recv, musaStreamNonBlocking, _comm_priority));
+  NVTE_CHECK_CUDA(
+    musaStreamCreateWithPriority(&_stream_comm_ce, musaStreamNonBlocking, _comm_priority));
   NVTE_CHECK_CUDA(musaEventCreateWithFlags(&_stop_send, 0));
   NVTE_CHECK_CUDA(musaEventCreateWithFlags(&_stop_recv, 0));
+  NVTE_CHECK_CUDA(musaEventCreateWithFlags(&_stop_comm, 0));
 }
 
 CommOverlapP2PBase::~CommOverlapP2PBase() {
   musaEventDestroy(_stop_recv);
   musaEventDestroy(_stop_send);
+  musaEventDestroy(_stop_comm);
   musaStreamDestroy(_stream_recv);
+  musaStreamDestroy(_stream_comm_ce);
   for (size_t i = 0; i < _stream_send.size(); i++) musaStreamDestroy(_stream_send[i]);
 }
 
@@ -934,8 +939,13 @@ void CommOverlapP2PBase::split_overlap_ag(const TensorWrapper &A, bool transa,
   size_t workspace_size_chunk = workspace.numel() / _stream_compute.size();
 
   NVTE_CHECK_CUDA(musaEventRecord(_start_compute, stream_main));
-  NVTE_CHECK_CUDA(musaStreamWaitEvent(_stream_send[0], _start_compute, 0));
-  NVTE_CHECK_CUDA(musaStreamWaitEvent(_stream_recv, _start_compute, 0));
+  if (_use_ce) {
+    NVTE_CHECK_CUDA(musaStreamWaitEvent(_stream_comm_ce, _start_compute, 0));
+  }
+  else {
+    NVTE_CHECK_CUDA(musaStreamWaitEvent(_stream_send[0], _start_compute, 0));
+    NVTE_CHECK_CUDA(musaStreamWaitEvent(_stream_recv, _start_compute, 0));
+  }
   for (size_t i = 0; i < _stream_compute.size(); i++) {
     NVTE_CHECK_CUDA(musaStreamWaitEvent(_stream_compute[i], _start_compute, 0));
   }
@@ -1031,12 +1041,23 @@ void CommOverlapP2PBase::split_overlap_ag(const TensorWrapper &A, bool transa,
 
       if (i < _tp_size - 1) {
         // P2P communication
-        userbuffers_send(_ub_reg, send_offset, _ub_reg, send_offset, comm_bytes, _ub_comm,
-                         _next_rank, _stream_send[0]);
-        userbuffers_recv(_ub_reg, recv_offset, _ub_reg, recv_offset, comm_bytes, _ub_comm,
-                         _prev_rank, _stream_recv);
-        NVTE_CHECK_CUDA(musaEventRecord(_stop_recv, _stream_recv));
-        NVTE_CHECK_CUDA(musaStreamWaitEvent(_stream_send[0], _stop_recv, 0));
+        if (_use_ce) {
+          NVTE_CHECK_CUDA(musaStreamWaitEvent(_stream_comm_ce, _start_comm, 0));
+          comm_userbuff_over_ce(_ub_reg, recv_offset, _ub_reg, recv_offset, _ubufs[0].numel(),
+                            comm_bytes, _ub_comm, _next_rank, _prev_rank, A.dtype(), _tp_id,
+                            _stream_comm_ce);
+
+        } else {
+          userbuffers_send(_ub_reg, send_offset, _ub_reg, send_offset, comm_bytes, _ub_comm,
+            _next_rank, _stream_send[0]);
+          NVTE_CHECK_CUDA(musaStreamSynchronize(_stream_send[0]));
+          userbuffers_recv(_ub_reg, recv_offset, _ub_reg, recv_offset, comm_bytes, _ub_comm,
+                      _prev_rank, _stream_recv);
+          NVTE_CHECK_CUDA(musaStreamSynchronize(_stream_recv));
+          NVTE_CHECK_CUDA(musaEventRecord(_stop_recv, _stream_recv));
+          NVTE_CHECK_CUDA(musaStreamWaitEvent(_stream_send[0], _stop_recv, 0));
+
+        }
         NVTE_CHECK_CUDA(
             musaStreamWaitEvent(_stream_compute[(i + 1) % _stream_compute.size()], _stop_recv, 0));
       } else if (B_copy.numel() > 0) {
@@ -1054,9 +1075,14 @@ void CommOverlapP2PBase::split_overlap_ag(const TensorWrapper &A, bool transa,
     NVTE_CHECK_CUDA(musaEventRecord(_stop_compute, _stream_compute[i]));
     NVTE_CHECK_CUDA(musaStreamWaitEvent(stream_main, _stop_compute, 0));
   }
-  NVTE_CHECK_CUDA(musaEventRecord(_stop_send, _stream_send[0]));
-  NVTE_CHECK_CUDA(musaStreamWaitEvent(stream_main, _stop_send, 0));
-  NVTE_CHECK_CUDA(musaEventRecord(_stop_recv, _stream_recv));
+  if (!_use_ce) {
+    NVTE_CHECK_CUDA(musaEventRecord(_stop_send, _stream_send[0]));
+    NVTE_CHECK_CUDA(musaStreamWaitEvent(stream_main, _stop_send, 0));
+    NVTE_CHECK_CUDA(musaEventRecord(_stop_recv, _stream_recv));
+  } else {
+    NVTE_CHECK_CUDA(musaEventRecord(_stop_recv, _stream_comm_ce));
+  }
+
   NVTE_CHECK_CUDA(musaStreamWaitEvent(stream_main, _stop_recv, 0));
 }  // CommOverlapP2PBase::split_overlap_ag
 
@@ -1150,10 +1176,14 @@ void CommOverlapP2PBase::split_overlap_rs(const TensorWrapper &A, bool transa,
 
   // Catch up the main stream
   NVTE_CHECK_CUDA(musaEventRecord(_start_compute, stream_main));
-  for (size_t i = 0; i < _stream_send.size(); i++) {
-    NVTE_CHECK_CUDA(musaStreamWaitEvent(_stream_send[i], _start_compute, 0));
+  if (_use_ce) {
+    NVTE_CHECK_CUDA(musaStreamWaitEvent(_stream_comm_ce, _start_compute, 0));
+  } else {
+    for (size_t i = 0; i < _stream_send.size(); i++) {
+      NVTE_CHECK_CUDA(musaStreamWaitEvent(_stream_send[i], _start_compute, 0));
+    }
+    NVTE_CHECK_CUDA(musaStreamWaitEvent(_stream_recv, _start_compute, 0));
   }
-  NVTE_CHECK_CUDA(musaStreamWaitEvent(_stream_recv, _start_compute, 0));
   for (size_t i = 0; i < _stream_compute.size(); i++) {
     NVTE_CHECK_CUDA(musaStreamWaitEvent(_stream_compute[i], _start_compute, 0));
   }
@@ -1181,25 +1211,42 @@ void CommOverlapP2PBase::split_overlap_rs(const TensorWrapper &A, bool transa,
       int send_rank = (_tp_id + i) % _tp_size + _rank_round_tp;
       int recv_rank = (_tp_size + _tp_id - i) % _tp_size + _rank_round_tp;
       NVTE_CHECK_CUDA(musaEventRecord(_start_comm, _stream_compute[prev_stream_id]));
-      NVTE_CHECK_CUDA(musaStreamWaitEvent(_stream_send[prev_stream_id], _start_comm, 0));
-      NVTE_CHECK_CUDA(musaStreamWaitEvent(_stream_recv, _start_comm, 0));
-      userbuffers_send(_ub_reg, send_offset, _ub_reg, recv_offset, comm_bytes, _ub_comm, send_rank,
-                       _stream_send[prev_stream_id]);
-      userbuffers_recv(_ub_reg, send_offset, _ub_reg, recv_offset, comm_bytes, _ub_comm, recv_rank,
-                       _stream_recv);
+      if (_use_ce) {
+        NVTE_CHECK_CUDA(musaStreamWaitEvent(_stream_comm_ce, _start_comm, 0));
+        comm_userbuff_over_ce(_ub_reg, send_offset, _ub_reg, recv_offset, _ubufs[0].numel(),
+                            comm_bytes, _ub_comm, send_rank, recv_rank, A.dtype(), _tp_id, 
+                            _stream_comm_ce);
+      } else {
+        NVTE_CHECK_CUDA(musaStreamWaitEvent(_stream_send[prev_stream_id], _start_comm, 0));
+        NVTE_CHECK_CUDA(musaStreamWaitEvent(_stream_recv, _start_comm, 0));
+        userbuffers_send(_ub_reg, send_offset, _ub_reg, recv_offset, comm_bytes, _ub_comm, send_rank,
+                         _stream_send[prev_stream_id]);
+        NVTE_CHECK_CUDA(musaStreamSynchronize(_stream_send[prev_stream_id]));
+        userbuffers_recv(_ub_reg, send_offset, _ub_reg, recv_offset, comm_bytes, _ub_comm, recv_rank,
+                         _stream_recv);
+        NVTE_CHECK_CUDA(musaStreamSynchronize(_stream_recv));
+      }
     }
   }
+  NVTE_CHECK_CUDA(musaStreamSynchronize(_stream_comm_ce));
 
   for (size_t i = 0; i < _stream_compute.size(); i++) {
     NVTE_CHECK_CUDA(musaEventRecord(_stop_compute, _stream_compute[i]));
     NVTE_CHECK_CUDA(musaStreamWaitEvent(stream_main, _stop_compute, 0));
   }
-  for (size_t i = 0; i < _stream_compute.size(); i++) {
-    NVTE_CHECK_CUDA(musaEventRecord(_stop_send, _stream_send[i]));
-    NVTE_CHECK_CUDA(musaStreamWaitEvent(stream_main, _stop_send, 0));
+  if (!_use_ce) {
+    for (size_t i = 0; i < _stream_compute.size(); i++) {
+      NVTE_CHECK_CUDA(musaEventRecord(_stop_send, _stream_send[i]));
+      NVTE_CHECK_CUDA(musaStreamWaitEvent(stream_main, _stop_send, 0));
+    }
+    NVTE_CHECK_CUDA(musaEventRecord(_stop_recv, _stream_recv));
+    NVTE_CHECK_CUDA(musaStreamWaitEvent(stream_main, _stop_recv, 0));
   }
-  NVTE_CHECK_CUDA(musaEventRecord(_stop_recv, _stream_recv));
-  NVTE_CHECK_CUDA(musaStreamWaitEvent(stream_main, _stop_recv, 0));
+  else {
+    NVTE_CHECK_CUDA(musaEventRecord(_stop_comm, _stream_comm_ce));
+    NVTE_CHECK_CUDA(musaStreamWaitEvent(stream_main, _stop_comm, 0));
+  }
+
 
   // Reduce GEMM output chunks
   char *reduce_buf_ptr = reinterpret_cast<char *>(_ubufs[_tp_size - 1].dptr());

@@ -290,6 +290,10 @@ output is strided: row starts separated by stride elements*/
 // push model: data arrived and visible at receiver(barrier enforced)
 // pull model: data ready to be pulled by receiver(no barrier needed)
 
+void comm_userbuff_over_ce(const int srchandler, const size_t srcoffset, const int dsthandler,
+                           const size_t dstoffset, const int elements, const int comm_bytes,
+                           communicator *comm, const int send_peer, const int recv_peer, 
+                           transformer_engine::DType dtype, const int _tp_id, musaStream_t stream = 0);
 void userbuffers_send(const int srchandler, const size_t srcoffset, const int dsthandler,
                       const size_t dstoffset, const size_t bytes, communicator *comm,
                       const int peer, musaStream_t stream = 0);

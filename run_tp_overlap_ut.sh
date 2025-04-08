@@ -48,8 +48,14 @@ cmd="torchrun --nproc-per-node=$TP_SIZE tests/pytorch/distributed/run_gemm_with_
 # ring_exchange overlap rs
 # cmd="torchrun --nproc-per-node=$TP_SIZE tests/pytorch/distributed/run_gemm_with_overlap.py --comm-type rs --p2p --verbose --dtype bf16 --batch-size $BATCH_SIZE --seq-length $SEQ_LENGTH --num-heads $NUM_HEADS --head-dim $HEAD_SIZE --warmup-iters $WARMUP_ITERS --timing-iters $TIMING_ITERS --check-numerics"
 
+# ring_exchange overlap rs over ce
+# cmd="torchrun --nproc-per-node=$TP_SIZE tests/pytorch/distributed/run_gemm_with_overlap.py --comm-type rs --p2p --verbose --dtype bf16 --batch-size $BATCH_SIZE --seq-length $SEQ_LENGTH --num-heads $NUM_HEADS --head-dim $HEAD_SIZE --warmup-iters $WARMUP_ITERS --timing-iters $TIMING_ITERS --use-ce --check-numerics"
+
 # ring_exchange overlap ag
 # cmd="torchrun --nproc-per-node=$TP_SIZE tests/pytorch/distributed/run_gemm_with_overlap.py --comm-type ag --p2p --verbose --dtype bf16 --batch-size $BATCH_SIZE --seq-length $SEQ_LENGTH --num-heads $NUM_HEADS --head-dim $HEAD_SIZE --warmup-iters $WARMUP_ITERS --timing-iters $TIMING_ITERS --check-numerics"
+
+# ring_exchange overlap ag over ce
+# cmd="torchrun --nproc-per-node=$TP_SIZE tests/pytorch/distributed/run_gemm_with_overlap.py --comm-type ag --p2p --verbose --dtype bf16 --batch-size $BATCH_SIZE --seq-length $SEQ_LENGTH --num-heads $NUM_HEADS --head-dim $HEAD_SIZE --warmup-iters $WARMUP_ITERS --timing-iters $TIMING_ITERS --use-ce --check-numerics"
 
 
 echo $cmd

@@ -322,7 +322,7 @@ def _main(opts):
             set_sm_margin=opts.comm_type == tex.CommOverlapType.RS or opts.atomic,
             atomic_gemm=opts.atomic,
             aggregate=opts.aggregate,
-            use_ce=not (opts.atomic and bool(int(os.getenv("NVTE_AG_P2P_MULTI_ATOMIC", "0")))),
+            use_ce=opts.use_ce,
         )
         if opts.p2p
         else tex.CommOverlap(

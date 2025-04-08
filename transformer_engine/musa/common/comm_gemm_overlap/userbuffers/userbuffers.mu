@@ -21,6 +21,18 @@
 const uint64_t global_idf = 0ULL;
 #define MAX_THREADS 1024
 
+#define CHECK_MUSA_DRIVER(cmd)                                                               \
+  do {                                                                                       \
+    MUresult err = cmd;                                                                      \
+    if (err != MUSA_SUCCESS) {                                                               \
+      const char *errStr;                                                                    \
+      muGetErrorString(err, &errStr);                                                        \
+      fprintf(stderr, "MUSA Driver Error at %d:%s\n %s\n", __LINE__, __FILE__, errStr);      \
+      exit(1);                                                                               \
+    }                                                                                        \
+  } while (0)
+
+
 // TODO(yuzhe.wu): replace asm volatile("fence.sc.gpu;\n") temporarily and the correctness needs to be verified
 #define ATOMIC_CONSUMER(chunk)                                             \
   if (counters) {                                                          \
@@ -2102,7 +2114,7 @@ __global__ void kuserbuffers_pushrecv(int myrank, int peer, int nvrank, int nvpe
   volatile int *flag = (volatile int *)flagptr;
   if (*flag >= signal_id) return;
   clock_t s = clock64();
-  while (CHECK_IDS(*flag, signal_id)) {
+  while (CHECK_IDS(volatile_load((int*)flag), signal_id)) {
     if (CHECK_TIMEOUT(s, ub_timeout)) {
       UB_PRINT(
           "pushrecv [grank dst:%d global src:%d][nvrank(GPU) dst: %d src: %d]: "
@@ -2353,6 +2365,66 @@ __global__ void __launch_bounds__(MAX_THREADS) kuserbuffers_pushsendrecv_multiat
    ((NVTE_REG0_OFFSET(comm) + NVTE_REG0_RECV + (recv_peer) * NVTE_MAX_REGIONS + (dsth) + \
      (index) * NVTE_MAX_NVLINK * NVTE_MAX_REGIONS) *                                     \
     sizeof(int)))
+
+void comm_userbuff_over_ce(const int srchandler, const size_t srcoffset, const int dsthandler,
+                           const size_t dstoffset, const int elements, const int comm_bytes,
+                           communicator *comm, const int send_peer, const int recv_peer, 
+                           transformer_engine::DType dtype, const int _tp_id, musaStream_t stream) {
+
+assert(dtype == transformer_engine::DType::kFloat16 || dtype == transformer_engine::DType::kBFloat16);
+
+MUatomicType atomicType = MUatomicType::MU_ATOMIC_TYPE_ATOMIC_ADD_BF16;
+if (dtype == transformer_engine::DType::kFloat16) {
+atomicType = MUatomicType::MU_ATOMIC_TYPE_ATOMIC_ADD_HF16;
+}
+int send_peerlocal = send_peer % comm->nvsize;
+int recv_peerlocal = recv_peer % comm->nvsize;
+
+void *flagptr_send = GET_SEND_PTR_BY_INDEX(send_peerlocal, comm, dsthandler, 0);
+void *flagptr_recv = GET_RECV_PTR_BY_INDEX(recv_peer, comm, dsthandler, 0);
+
+void *dstptr = reinterpret_cast<char *>(comm->mem_ptr[dsthandler]) + dstoffset;
+void *srcptr = reinterpret_cast<char *>(comm->peer_ptr[srchandler][recv_peerlocal]) + srcoffset;
+
+// pull mode
+CHECK_MUSA_DRIVER(muStreamWaitValue64(
+       (MUstream)stream,
+       (MUdeviceptr)flagptr_send,
+       0,
+       MUstreamWaitValue_flags::MU_STREAM_WAIT_VALUE_EQ));
+
+CHECK_MUSA_DRIVER(muMemoryAtomicValueAsync(
+       (MUdeviceptr)flagptr_send,
+       1,
+       MUatomicValueType::MU_ATOMIC_VALUE_TYPE_ATOMIC_ADD64,
+       (MUstream)stream));
+
+CHECK_MUSA_DRIVER(muStreamWaitValue64(
+       (MUstream)stream,
+       (MUdeviceptr)flagptr_recv,
+       1,
+       MUstreamWaitValue_flags::MU_STREAM_WAIT_VALUE_EQ));
+
+// CHECK_MUSA_DRIVER(muMemoryAtomicAsync(
+//                           (MUdeviceptr)dstptr,
+//                           (MUdeviceptr)srcptr,
+//                           elements,
+//                           atomicType,
+//                           (MUstream)stream));
+NVTE_CHECK_CUDA(musaMemcpyAsync(
+       dstptr,
+       srcptr,
+       comm_bytes,
+       musaMemcpyDeviceToDevice,
+       stream));
+
+CHECK_MUSA_DRIVER(muStreamWriteValue64(
+       (MUstream)stream,
+       (MUdeviceptr)flagptr_recv,
+       0,
+       MUstreamWriteValue_flags::MU_STREAM_WRITE_VALUE_DEFAULT));
+}
+
 
 void userbuffers_send(const int srchandler, const size_t srcoffset, const int dsthandler,
                       const size_t dstoffset, const size_t bytes, communicator *comm,
@@ -2697,14 +2769,14 @@ template void reduce_fp8_in_bf16_out<__mt_fp8_e5m2>(void *inputs, void *output, 
 __global__ void __launch_bounds__(MAX_THREADS / 4)
     reduce_bf16_musa(void *inputs, void *output, const int num_inputs, const int input_size) {
   const size_t tid = threadIdx.x + blockDim.x * blockIdx.x;
-  half *inputs_half = reinterpret_cast<half *>(inputs);
+  __mt_bfloat16 *inputs_half = reinterpret_cast<__mt_bfloat16 *>(inputs);
   float accum_buf = static_cast<float>(inputs_half[tid]);
 #pragma unroll
   for (int i = 1; i < num_inputs; i++) {
     accum_buf += static_cast<float>(inputs_half[tid + input_size * i]);
   }
-  half *output_half = reinterpret_cast<half *>(output);
-  output_half[tid] = (half)accum_buf;
+  __mt_bfloat16 *output_half = reinterpret_cast<__mt_bfloat16 *>(output);
+  output_half[tid] = (__mt_bfloat16)accum_buf;
 }
 
 void reduce_bf16(void *inputs, void *output, int num_inputs, int input_size, musaStream_t stream) {
