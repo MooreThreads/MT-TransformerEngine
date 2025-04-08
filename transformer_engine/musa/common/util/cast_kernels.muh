@@ -1252,33 +1252,17 @@ void quantize_helper(const NVTETensor input, const NVTETensor grad, const NVTETe
     }
     case NVTE_MTFP8_BLOCK_SCALING: {
       NVTE_CHECK(output_tensor->has_data(), "Data should be provided for MTFP8 quantization.");
-      const bool is_fp8 = is_fp8_dtype(output_tensor->dtype());
+      NVTE_CHECK(is_fp8_dtype(output_tensor->dtype()));
       if (output_tensor->has_columnwise_data()) {
         if constexpr (!IS_DBIAS && !IS_DACT && !IS_ACT) {
-          if (!is_fp8) {
-            cast_transpose(*input_tensor, noop_tensor, output_tensor, stream);
-          } else {
-            mtfp8_cast_transpose(input_tensor, &noop_tensor, output_tensor, stream);
-          }
+          mtfp8_cast_transpose(input_tensor, &noop_tensor, output_tensor, stream);
         } else {
-          if (!is_fp8) {
-            cast_transpose_fused<IS_DBIAS, IS_DACT, IS_ACT, float, ParamOP, OP>(
-                *input_tensor, activation_input_tensor, output_tensor, dbias_tensor, workspace_tensor,
-                stream);
-          } else {
-            NVTE_ERROR("MTFP8 cast_transpose_fused not supported.");
-          }
+          NVTE_ERROR("MTFP8 cast_transpose_fused not supported.");
         }
       } else {
-        if (!is_fp8) {
-          fp8_quantize<IS_DBIAS, IS_DACT, IS_ACT, ParamOP, OP>(
-            *input_tensor, activation_input_tensor, &noop_tensor, output_tensor, dbias_tensor,
+        mtfp8_quantize<IS_DBIAS, IS_DACT, IS_ACT, ParamOP, OP>(
+            input_tensor, activation_input_tensor, &noop_tensor, output_tensor, dbias_tensor,
             workspace_tensor, stream);
-        } else {
-          mtfp8_quantize<IS_DBIAS, IS_DACT, IS_ACT, ParamOP, OP>(
-              input_tensor, activation_input_tensor, &noop_tensor, output_tensor, dbias_tensor,
-              workspace_tensor, stream);
-        }
       }
       break;
     }

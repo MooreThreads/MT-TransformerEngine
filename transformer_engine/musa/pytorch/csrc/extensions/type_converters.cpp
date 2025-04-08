@@ -78,13 +78,16 @@ TensorWrapper NVTETensorFromMTFP8Tensor(py::handle tensor, Quantizer *quantizer)
   const DType dtype = tensor.attr("_fp8_dtype").cast<DType>();
   auto ret = TensorWrapper(NVTE_MTFP8_BLOCK_SCALING);
 
-  const at::Tensor &rowwise_data = tensor.attr("_rowwise_data").cast<at::Tensor>();
-  const auto &shape = getTensorShape(rowwise_data);
-  ret.set_rowwise_data(rowwise_data.data_ptr(), dtype, shape);
+  bool rowwise_usage = !(tensor.attr("_rowwise_data").is_none());
+  if (rowwise_usage) {
+    const at::Tensor &rowwise_data = tensor.attr("_rowwise_data").cast<at::Tensor>();
+    const auto &shape = getTensorShape(rowwise_data);
+    ret.set_rowwise_data(rowwise_data.data_ptr(), dtype, shape);
 
-  const at::Tensor &rowwise_scale_inv = tensor.attr("_rowwise_scale_inv").cast<at::Tensor>();
-  const auto rowwise_scale_inv_shape = getTensorShape(rowwise_scale_inv);
-  ret.set_rowwise_scale_inv(rowwise_scale_inv.data_ptr(), DType::kFloat32, rowwise_scale_inv_shape);
+    const at::Tensor &rowwise_scale_inv = tensor.attr("_rowwise_scale_inv").cast<at::Tensor>();
+    const auto rowwise_scale_inv_shape = getTensorShape(rowwise_scale_inv);
+    ret.set_rowwise_scale_inv(rowwise_scale_inv.data_ptr(), DType::kFloat32, rowwise_scale_inv_shape);
+  }
 
   bool columnwise_usage = !(tensor.attr("_columnwise_data").is_none());
   if (columnwise_usage) {

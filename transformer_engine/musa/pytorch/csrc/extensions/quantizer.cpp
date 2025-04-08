@@ -278,7 +278,7 @@ std::pair<TensorWrapper, py::object> MTFP8Quantizer::create_tensor(
     const auto sinv0 = (dim_m + block_m - 1) / block_m;
     const auto sinv1 = (dim_n + block_n - 1) / block_n;
 
-    rowwise_scale_inv = at::zeros({sinv0, sinv1}, opt.dtype(torch::kFloat));
+    rowwise_scale_inv = at::empty({sinv0, sinv1}, opt.dtype(torch::kFloat));
     tensor.set_rowwise_data(data.data_ptr(), dtype, shape);
     tensor.set_rowwise_scale_inv(rowwise_scale_inv.data_ptr(), DType::kFloat32,
                                  std::vector<size_t>{static_cast<size_t>(sinv0), static_cast<size_t>(sinv1)});
@@ -290,7 +290,7 @@ std::pair<TensorWrapper, py::object> MTFP8Quantizer::create_tensor(
     const auto sinv1 = (dim_n + block_m - 1) / block_m;
 
     columnwise_data = at::empty(torch_shape, opt.dtype(torch::kUInt8));
-    columnwise_scale_inv = at::zeros({sinv0, sinv1}, opt.dtype(torch::kFloat));
+    columnwise_scale_inv = at::empty({sinv0, sinv1}, opt.dtype(torch::kFloat));
     tensor.set_columnwise_data(columnwise_data.data_ptr(), dtype, shape);
     tensor.set_columnwise_scale_inv(columnwise_scale_inv.data_ptr(), DType::kFloat32,
                                     std::vector<size_t>{static_cast<size_t>(sinv0), static_cast<size_t>(sinv1)});

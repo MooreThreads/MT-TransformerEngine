@@ -73,8 +73,13 @@ void init_mtfp8_extension() {
       py::module_::import("transformer_engine.musa.pytorch.tensor.mtfp8_tensor_base");
   MTFP8TensorBasePythonClass = reinterpret_cast<PyTypeObject *>(
       PyObject_GetAttrString(fp8_base_module.ptr(), "MTFP8TensorBase"));
+
   NVTE_CHECK(MTFP8TensorPythonClass != nullptr,
              "Internal error: could not initialize pyTorch MTFP8 extension.");
+  NVTE_CHECK(MTFP8TensorBasePythonClass != nullptr,
+             "Internal error: could not initialize pyTorch MTFP8 extension.");
+  NVTE_CHECK(MTFP8QuantizerClass != nullptr,
+            "Internal error: could not initialize pyTorch MTFP8 extension.");
 }
 
 void init_extension() {

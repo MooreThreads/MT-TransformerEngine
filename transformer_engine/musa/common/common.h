@@ -122,24 +122,57 @@ struct Tensor {
     return data.dtype;
   }
 
+  std::vector<size_t> shape() const {
+    switch (scaling_mode) {
+      case NVTE_DELAYED_TENSOR_SCALING:
+        if (!has_data() && has_columnwise_data()) {
+          std::vector<size_t> ret;
+          if (!columnwise_data.shape.empty()) {
+            for (size_t i = 1; i < columnwise_data.shape.size(); i++) {
+              ret.push_back(columnwise_data.shape[i]);
+            }
+            ret.push_back(columnwise_data.shape.front());
+          }
+          return ret;
+        } else {
+          return data.shape;
+        }
+        break;
+      case NVTE_MXFP8_1D_SCALING:
+        if (!has_data() && has_columnwise_data()) {
+          return columnwise_data.shape;
+        } else {
+          return data.shape;
+        }
+        break;
+      case NVTE_MTFP8_BLOCK_SCALING: {
+        if (!has_data() && has_columnwise_data()) {
+          return columnwise_data.shape;
+        } else {
+          return data.shape;
+        }
+        break;
+      }
+      default:
+        NVTE_ERROR("Cannot parse tensor shape with scaling mode \"", (int)scaling_mode, "\"");
+        return {};
+    }
+  }
+
   /*! Matrix height after tensor is flattened to 2D
    *
    * If a tensor has dimensions (D1, D2, ..., Dn), it is reinterpreted
    * as a (D1*D2*...*D(n-1), Dn) matrix.
    */
   size_t flat_first_dim() const {
-    if (!has_data() && has_columnwise_data()) {
-      const auto &data_shape = columnwise_data.shape;
-      if (data_shape.empty()) return 1;
-      if (scaling_mode == NVTE_DELAYED_TENSOR_SCALING) {
-        return product(data_shape, 1, data_shape.size());
-      } else {
-        return product(data_shape, 0, data_shape.size() - 1);
+    const auto &full_shape = shape();
+    size_t ret = 1;
+    if (!full_shape.empty()) {
+      for (size_t i = 0; i < full_shape.size() - 1; i++) {
+        ret *= full_shape[i];
       }
     }
-    const auto &data_shape = data.shape;
-    if (data_shape.empty()) return 1;
-    return product(data_shape, 0, data_shape.size() - 1);
+    return ret;
   }
 
   /*! Matrix width after tensor is flattened to 2D
@@ -148,18 +181,12 @@ struct Tensor {
    * as a (D1*D2*...*D(n-1), Dn) matrix.
    */
   size_t flat_last_dim() const {
-    if (!has_data() && has_columnwise_data()) {
-      const auto &data_shape = columnwise_data.shape;
-      if (data_shape.empty()) return 1;
-      if (scaling_mode == NVTE_DELAYED_TENSOR_SCALING) {
-        return data_shape.front();
-      } else {
-        return data_shape.back();
-      }
+    const auto &full_shape = shape();
+    if (full_shape.empty()) {
+      return 1;
+    } else {
+      return full_shape.back();
     }
-    const auto &data_shape = data.shape;
-    if (data_shape.empty()) return 1;
-    return data_shape.back();
   }
 };
 

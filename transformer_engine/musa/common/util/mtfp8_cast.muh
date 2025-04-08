@@ -26,9 +26,9 @@ inline void mtfp8_quantize_dispatch(
         const auto N = input->flat_last_dim();
         const auto sinv_m = output->scale_inv.shape[0];
         const auto sinv_n = output->scale_inv.shape[1];
-        if (M == sinv_m) {
+        const size_t group_size = next_power_of_2(N / sinv_n);
+        if (M == 1 || M == sinv_m) {
           // 1 * N
-          const size_t group_size = N / sinv_n;
           fp8_groupwise_cast<Param, OP>(
               reinterpret_cast<const IType*>(input->data.dptr),
               reinterpret_cast<const CType*>(noop->data.dptr),
@@ -37,7 +37,6 @@ inline void mtfp8_quantize_dispatch(
               M, N, group_size, param, stream);
         } else {
           // N * N
-          const size_t group_size = N / sinv_n;
           fp8_blockwise_cast<Param, OP>(
             reinterpret_cast<const IType*>(input->data.dptr),
             reinterpret_cast<const CType*>(noop->data.dptr),

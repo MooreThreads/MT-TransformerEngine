@@ -180,12 +180,7 @@ def create_mtfp8_groupwise_recipe_state(mode, group_size):
     else:
         n_gemms = 2
     state = MTFP8BlockScalingRecipeState(
-        MTFP8BlockScaling(
-            activation_block_m=1,
-            activation_block_n=group_size,
-            weight_block_m=group_size,
-            weight_block_n=group_size,
-        ),
+        MTFP8BlockScaling(tile_size=group_size),
         mode=mode,
         num_quantizers=n_gemms,
         device=torch.device(dev),

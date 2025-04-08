@@ -30,22 +30,17 @@ class MTFP8BlockScaling(Recipe):
     fp8_dpa: bool = False
     fp8_mha: bool = False
 
-    activation_block_m: int = 1
-    activation_block_n: int = 128
-    weight_block_m: int = 128
-    weight_block_n: int = 128
+    tile_size: int = 128
 
     def __post_init__(self) -> None:
         assert self.fp8_format != Format.E5M2, "Pure E5M2 training is not supported."
+        assert self.tile_size == 128, "Only supports 128 tile_size yet."
 
     def __repr__(self) -> str:
         return (
             f"margin={self.margin}, "
             f"format={str(self.fp8_format).split('.')[1]}, "
-            f"activation_block_m={self.activation_block_m}, "
-            f"activation_block_n={self.activation_block_n}, "
-            f"weight_block_m={self.weight_block_m}, "
-            f"weight_block_n={self.weight_block_n}, "
+            f"tile_size={self.tile_size}, "
             f"fp8_dpa={self.fp8_dpa}, "
             f"fp8_mha={self.fp8_mha}"
         )
@@ -81,12 +76,12 @@ class MTFP8BlockScalingRecipeState(RecipeState):
         self.dtype = get_fp8_te_dtype(recipe, mode == "forward")
 
         activation_blocks = {
-            "block_m": self.recipe.activation_block_m,
-            "block_n": self.recipe.activation_block_n,
+            "block_m": 1,
+            "block_n": self.recipe.tile_size,
         }
         weight_blocks = {
-            "block_m": self.recipe.weight_block_m,
-            "block_n": self.recipe.weight_block_n,
+            "block_m": self.recipe.tile_size,
+            "block_n": self.recipe.tile_size,
         }
 
         if mode == "forward":
@@ -168,11 +163,13 @@ def musa_restore_fp8_meta_tensors(fp8_meta: Dict[str, Any]) -> None:
         return
     FP8GlobalStateManager._orig_restore_fp8_meta_tensors(fp8_meta)
 
+
 def musa_get_default_fp8_recipe() -> Recipe:
     """FP8 recipe with default args."""
     if not os.getenv("FP8_PER_TENSOR", True):
         return MTFP8BlockScaling()
     return DelayedScaling()
+
 
 def pytorch_fp8_workaround():
     from transformer_engine.pytorch import fp8
@@ -200,5 +197,6 @@ def pytorch_fp8_workaround():
         musa_restore_fp8_meta_tensors,
     )
     replace_attr(fp8, "get_default_fp8_recipe", musa_get_default_fp8_recipe)
+
 
 pytorch_fp8_workaround()

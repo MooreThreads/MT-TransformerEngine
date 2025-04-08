@@ -17,6 +17,22 @@ inline bool is_power_of_2(size_t n) {
   return (n > 0) && (n & (n - 1)) == 0;
 }
 
+inline size_t next_power_of_2(size_t n) {
+  assert(n >= 1);
+  if (is_power_of_2(n)) {
+    return n;
+  }
+  n |= n >> 1;
+	n |= n >> 2;
+	n |= n >> 4;
+	n |= n >> 8;
+	n |= n >> 16;
+	n |= n >> 32;
+  n += 1;
+  assert(is_power_of_2(n));
+  return n;
+}
+
 inline size_t ceil_div(size_t a, size_t b) {
   return (a + b - 1) / b;
 }

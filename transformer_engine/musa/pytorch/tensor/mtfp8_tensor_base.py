@@ -37,16 +37,16 @@ class MTFP8TensorBase:
     _columnwise_data: Optional[torch.Tensor]
     _quantizer: Optional[Quantizer]
     _fp8_dtype: tex.DType
-    _rowwise_scale_inv: torch.Tensor
-    _columnwise_scale_inv: torch.Tensor
+    _rowwise_scale_inv: Optional[torch.Tensor]
+    _columnwise_scale_inv: Optional[torch.Tensor]
 
     def __new__(
         cls,
         *args,
-        rowwise_data: Optional[torch.Tensor],
+        rowwise_data: torch.Tensor,
         rowwise_scale_inv: torch.Tensor,
         columnwise_data: Optional[torch.Tensor],
-        columnwise_scale_inv: torch.Tensor,
+        columnwise_scale_inv: Optional[torch.Tensor],
         fp8_dtype: tex.DType,
         quantizer: Optional[Quantizer] = None,
         **kwargs,
@@ -73,6 +73,8 @@ class MTFP8TensorBase:
 
     def prepare_for_saving(self) -> Tuple[list[Optional[torch.Tensor]], MTFP8TensorBase]:
         tensors = [self._rowwise_data, self._columnwise_data]
+        self._rowwise_data = None
+        self._columnwise_data = None
         return tensors, self
 
     def restore_from_saved(
@@ -89,15 +91,23 @@ class MTFP8TensorBase:
         return _FromMTFP8Func.forward(None, self, dtype)
 
     def size(self, *args, **kwargs):
-        return self._rowwise_data.size(*args, **kwargs)
+        if self._rowwise_data is not None:
+            return self._rowwise_data.size(*args, **kwargs)
+        return self._columnwise_data.size(*args, **kwargs)
 
     def __repr__(self):
-        data_rowwise = self.dequantize()
+        data = self.dequantize()
+        if self._rowwise_data is not None:
+            descriptor = "rowwise"
+            sinv = self._rowwise_scale_inv
+        else:
+            descriptor = "columnwise"
+            sinv = self._columnwise_scale_inv
 
         return (
             "MTFP8TensorBase("
             f"fp8_dtype={self._fp8_dtype}, "
-            f"rowwise_scaled_data={data_rowwise}"
-            f"rowwise_scale_inv={self._rowwise_scale_inv}, "
+            f"{descriptor}_scaled_data={data}, "
+            f"{descriptor}_scale_inv={sinv}"
             ")"
         )

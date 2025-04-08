@@ -354,11 +354,7 @@ void mtfp8_cast_transpose(const Tensor* input, const Tensor* noop, Tensor* outpu
   const auto columnwise_sinv_m = output->columnwise_scale_inv.shape[0];
   const auto columnwise_sinv_n = output->columnwise_scale_inv.shape[1];
 
-  // Assume block size is [1, N] padded.
-  // NVTE_CHECK((rowwise_sinv_m == num_rows) && (row_length % rowwise_sinv_n == 0));
-  // NVTE_CHECK(columnwise_sinv_n == row_length);  // allow unaligned case in batch dimension
-  // const size_t group_size = (row_length / rowwise_sinv_n);
-  const size_t group_size = std::max((row_length / rowwise_sinv_n), (num_rows / columnwise_sinv_m));
+  const size_t group_size = next_power_of_2(row_length / rowwise_sinv_n);
 
   TRANSFORMER_ENGINE_TYPE_SWITCH_NON_FP8ONLY(
       input->data.dtype, InputType,
