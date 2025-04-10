@@ -341,12 +341,27 @@ void nvte_multi_stream_cublas_gemm(
 
   std::call_once(init_flag, init_streams_and_events);
 
-  const int num_stream_used = std::min(num_streams, num_gemms);
+  int num_stream_used = std::min(num_streams, num_gemms);
+  // wait for current stream to finish
+  NVTE_CHECK_CUDA(musaEventRecord(cublas_event[0], stream));
+  for (int s = 0; s < num_stream_used; s++) {
+    NVTE_CHECK_CUDA(musaStreamWaitEvent(compute_streams[s], cublas_event[0]));
+  }
+
+  std::call_once(init_flag, init_streams_and_events);
 
   for (int i = 0; i < num_gemms; i++) {
     mudnn_gemm(
         A[i], B[i], D[i], bias[i], pre_gelu_out[i], transa, transb, grad,
         workspace[i % num_streams], accumulate, use_split_accumulator, math_sm_count,
-        musaStreamDefault); // compute_streams[i % num_streams]
+        compute_streams[i % num_streams]); // compute_streams[i % num_streams]
+  }
+  // record events on compute streams
+  for (int s = 0; s < num_stream_used; s++) {
+    NVTE_CHECK_CUDA(musaEventRecord(cublas_event[s], compute_streams[s]));
+  }
+  // wait for all compute streams to finish
+  for (int s = 0; s < num_stream_used; s++) {
+    NVTE_CHECK_CUDA(musaStreamWaitEvent(stream, cublas_event[s]));
   }
 }
