@@ -59,7 +59,7 @@ def patch_after_import_torch():
     torch.cuda.default_generators = torch.musa.default_generators
 
     torch.cuda.memory_allocated = torch.musa.memory_allocated
-    torch.cuda.max_memory_allocated = torch.musa.memory_allocated
+    torch.cuda.max_memory_allocated = torch.musa.max_memory_allocated
     torch.cuda.memory_reserved = torch.musa.memory_reserved
     torch.cuda.max_memory_reserved = torch.musa.max_memory_reserved
 
