@@ -64,6 +64,11 @@ def patch_after_import_torch():
     torch.cuda.max_memory_allocated = torch.musa.max_memory_allocated
     torch.cuda.memory_reserved = torch.musa.memory_reserved
     torch.cuda.max_memory_reserved = torch.musa.max_memory_reserved
+    
+    # (yehua.zhang) replace lazy_call to avoid cpu memory leak, 
+    # because failure of cuda init in lazy_call will cause endless operation of emplace back.
+    torch.cuda._lazy_call = torch.musa.core._lazy_init._lazy_call
+    torch.cuda._lazy_init = torch.musa.core._lazy_init._lazy_init
 
     original_tensor = torch.tensor
     def patched_tensor(*args, **kwargs):
