@@ -9,10 +9,12 @@ def patch_before_import_te():
     from .pytorch import attention
     from .pytorch import tensor
     from .pytorch import fp8
+    from .pytorch import distributed
     from .pytorch.module import base
     from .pytorch.ops import op
     from .pytorch.cpp_extensions import cast
     from .pytorch.module import linear
+    from .pytorch.module import grouped_linear
     from .pytorch import utils
 
 def patch_after_import_torch():
