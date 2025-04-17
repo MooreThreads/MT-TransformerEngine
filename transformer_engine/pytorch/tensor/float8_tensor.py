@@ -340,9 +340,6 @@ class Float8Tensor(Float8TensorBase, QuantizedTensor):
         self._transpose = torch.Tensor() if self._transpose is not None else None
         self._transpose_invalid = True
 
-    def prepare_for_saving(self) -> Tuple[list[Optional[torch.Tensor]], Float8TensorBase]:
-        return [self], None
-
     @classmethod
     def __torch_dispatch__(cls, func, types, args, kwargs=None):
 

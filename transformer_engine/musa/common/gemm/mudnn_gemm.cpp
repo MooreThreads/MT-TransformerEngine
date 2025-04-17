@@ -4,6 +4,7 @@
 #include "../common.h"
 #include "../util/logging.h"
 #include "../util/mudnn.h"
+#include "../util/mtfp8_utils.muh"
 
 namespace transformer_engine {
 
@@ -15,6 +16,7 @@ using transformer_engine::musa::Flat2DimShape;
 using transformer_engine::musa::CreateMUTensor;
 using transformer_engine::musa::ToTorchDtype;
 using transformer_engine::musa::SetMUTensorDType;
+using mtfp8::next_power_of_2;
 
 const auto empty_te_tensor = Tensor();
 const auto empty_mu_tensor = at::musa::CreateEmptyMUTensor();
@@ -183,7 +185,7 @@ void fp8_gemm(
     CHECK_MUDNN_STATUS(param.SetScale(mu_scale_l, mu_scale_r, mu_scale_b, mu_scale_o), "SetScale");
   } else {
     NVTE_CHECK(inputB->scale_inv.shape.size() == 2);
-    const auto tile_size = static_cast<int>(inputB->data.shape[1] / inputB->scale_inv.shape[1]);
+    const auto tile_size = static_cast<int>(next_power_of_2(inputB->flat_last_dim() / inputB->scale_inv.shape[1]));
     CHECK_MUDNN_STATUS(param.SetScale(mu_scale_l, mu_scale_r, mu_scale_b, mu_scale_o, tile_size), "SetScale");
   }
   CHECK_MUDNN_STATUS(param.SetAmaxD(mu_amax_o), "SetAmax");

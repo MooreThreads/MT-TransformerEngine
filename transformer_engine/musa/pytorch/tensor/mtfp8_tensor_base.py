@@ -73,8 +73,6 @@ class MTFP8TensorBase:
 
     def prepare_for_saving(self) -> Tuple[list[Optional[torch.Tensor]], MTFP8TensorBase]:
         tensors = [self._rowwise_data, self._columnwise_data]
-        self._rowwise_data = None
-        self._columnwise_data = None
         return tensors, self
 
     def restore_from_saved(
