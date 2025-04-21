@@ -137,6 +137,7 @@ CommOverlapCore::~CommOverlapCore() {
   if (_atomic_gemm) musaFree(_counter.dptr());
 
   for (size_t i = 0; i < _stream_compute.size(); i++) musaStreamDestroy(_stream_compute[i]);
+  for (size_t i = 0; i < _stream_comm_ce.size(); i++) musaStreamDestroy(_stream_comm_ce[i]);
 
   if (_comm_created) {
 #ifdef NVTE_UB_WITH_MPI
@@ -284,26 +285,14 @@ void CommOverlapBase::comm_userbuff_over_ce(void *rs_output, transformer_engine:
                             MUatomicValueType::MU_ATOMIC_VALUE_TYPE_ATOMIC_ADD64,
                             (MUstream)_stream_comm_ce[i - 1]));
       }
-      NVTE_CHECK_CUDA_DRIVER(muStreamWaitValue64(
-                            (MUstream)_stream_comm,
-                            (MUdeviceptr)my_gpu_flag_sync,
-                            (muuint64_t)(_tp_size - 1),
-                            MUstreamWaitValue_flags::MU_STREAM_WAIT_VALUE_EQ));
-
-    //   NVTE_CHECK_CUDA_DRIVER(muMemoryAtomicValueAsync(
-    //                         (MUdeviceptr)my_gpu_flag_sync,
-    //                         (muuint64_t)(_tp_size - 1),
-    //                         MUatomicValueType::MU_ATOMIC_VALUE_TYPE_ATOMIC_SUB64,
-    //                         (MUstream)_stream_comm));
-    //   NVTE_CHECK_CUDA(musaMemsetAsync(my_gpu_flag_sync, 0, sizeof(uint64_t), _stream_comm));
-
-      NVTE_CHECK_CUDA_DRIVER(muStreamWriteValue64(
-                                (MUstream)_stream_comm,
-                                (MUdeviceptr)my_gpu_flag_sync,
-                                0,
-                                MUstreamWriteValue_flags::MU_STREAM_WRITE_VALUE_DEFAULT));
+      for (int i = 1; i < _tp_size; i++) {
+        NVTE_CHECK_CUDA_DRIVER(muStreamWaitValue64(
+                              (MUstream)_stream_comm_ce[i - 1],
+                              (MUdeviceptr)my_gpu_flag_sync,
+                              (muuint64_t)(_tp_size - 1),
+                              MUstreamWaitValue_flags::MU_STREAM_WAIT_VALUE_EQ));
+      }
     }
-    NVTE_CHECK_CUDA(musaStreamSynchronize(_stream_comm));
     
     for (int i = 1; i < _tp_size; i++) {
       size_t my_offset = 0;
@@ -350,7 +339,7 @@ void CommOverlapBase::comm_userbuff_over_ce(void *rs_output, transformer_engine:
                             (muuint64_t)(_tp_size - 1),
                             MUstreamWaitValue_flags::MU_STREAM_WAIT_VALUE_EQ));
     
-    //TODO: this sync will affect perf, we try to remove it; but process will hang in thousands iters when we simply remove it 
+    //TODO: this sync will affect perf, we try to remove it; but cost will imbalance when we remove it 
     NVTE_CHECK_CUDA(musaStreamSynchronize(_stream_comm));
 
     if (out_of_place) {
@@ -365,17 +354,6 @@ void CommOverlapBase::comm_userbuff_over_ce(void *rs_output, transformer_engine:
                             musaMemcpyDeviceToDevice,
                             _stream_comm));
     }
-    //   NVTE_CHECK_CUDA_DRIVER(muMemoryAtomicValueAsync(
-    //                         (MUdeviceptr)my_gpu_flag_rs,
-    //                         (muuint64_t)(_tp_size - 1),
-    //                         MUatomicValueType::MU_ATOMIC_VALUE_TYPE_ATOMIC_SUB64,
-    //                         (MUstream)_stream_comm));
-    // NVTE_CHECK_CUDA(musaMemsetAsync(my_gpu_flag_rs, 0, sizeof(uint64_t), _stream_comm));
-    NVTE_CHECK_CUDA_DRIVER(muStreamWriteValue64(
-                                (MUstream)_stream_comm,
-                                (MUdeviceptr)my_gpu_flag_rs,
-                                0,
-                                MUstreamWriteValue_flags::MU_STREAM_WRITE_VALUE_DEFAULT));
   }
 
 /*
@@ -445,10 +423,24 @@ void CommOverlapBase::bulk_overlap(const TensorWrapper &A, bool transa, const Te
                    stream_main);
 
   _ub_comm->sms = ori_sms;
-  if (!_use_ce) {
-    NVTE_CHECK_CUDA(musaEventRecord(_stop_comm, _stream_comm));
-    NVTE_CHECK_CUDA(musaStreamWaitEvent(stream_main, _stop_comm, 0));
+  
+  if (_use_ce) {
+    size_t gpu_flag_offset = NVTE_REG0_OFFSET(_ub_comm) - NVTE_REG0_SINGLENODE + NVTE_MAX_OPS;
+      void* my_gpu_flag_rs = reinterpret_cast<char *>(_ub_comm->gpu_ptrs) + gpu_flag_offset;
+      void* my_gpu_flag_sync = reinterpret_cast<char *>(_ub_comm->gpu_ptrs) + gpu_flag_offset + _num_splits * sizeof(uint64_t);
+      NVTE_CHECK_CUDA_DRIVER(muStreamWriteValue64(
+                                  (MUstream)_stream_comm,
+                                  (MUdeviceptr)my_gpu_flag_sync,
+                                  0,
+                                  MUstreamWriteValue_flags::MU_STREAM_WRITE_VALUE_DEFAULT));
+      NVTE_CHECK_CUDA_DRIVER(muStreamWriteValue64(
+                                  (MUstream)_stream_comm,
+                                  (MUdeviceptr)my_gpu_flag_rs,
+                                  0,
+                                  MUstreamWriteValue_flags::MU_STREAM_WRITE_VALUE_DEFAULT));
   }
+  NVTE_CHECK_CUDA(musaEventRecord(_stop_comm, _stream_comm));
+  NVTE_CHECK_CUDA(musaStreamWaitEvent(stream_main, _stop_comm, 0));
 }  // CommOverlapBase::bulk_overlap
 
 /*
@@ -698,9 +690,27 @@ void CommOverlapBase::split_overlap_rs(const TensorWrapper &A, bool transa, cons
     NVTE_CHECK_CUDA(musaEventRecord(_stop_compute, _stream_compute[i]));
     NVTE_CHECK_CUDA(musaStreamWaitEvent(stream_main, _stop_compute, 0));
   }
-  for (size_t i = 0; i < _stream_comm_ce.size(); i++) {
-    NVTE_CHECK_CUDA(musaEventRecord(_stop_comm, (musaStream_t)_stream_comm_ce[i]));
-    NVTE_CHECK_CUDA(musaStreamWaitEvent((musaStream_t)stream_main, _stop_comm, 0));
+  if (_use_ce) {
+    for (size_t i = 0; i < _stream_comm_ce.size(); i++) {
+      NVTE_CHECK_CUDA(musaEventRecord(_stop_comm, (musaStream_t)_stream_comm_ce[i]));
+      NVTE_CHECK_CUDA(musaStreamWaitEvent((musaStream_t)stream_main, _stop_comm, 0));
+    }
+
+    size_t gpu_flag_offset = NVTE_REG0_OFFSET(_ub_comm) - NVTE_REG0_SINGLENODE + NVTE_MAX_OPS;
+    for (size_t i = 0; i < _num_splits; i++) {
+      void* my_gpu_flag_rs = reinterpret_cast<char *>(_ub_comm->gpu_ptrs) + gpu_flag_offset + i * sizeof(uint64_t);
+      void* my_gpu_flag_sync = reinterpret_cast<char *>(_ub_comm->gpu_ptrs) + gpu_flag_offset + (i + _num_splits) * sizeof(uint64_t);
+      NVTE_CHECK_CUDA_DRIVER(muStreamWriteValue64(
+                                  (MUstream)_stream_comm,
+                                  (MUdeviceptr)my_gpu_flag_sync,
+                                  0,
+                                  MUstreamWriteValue_flags::MU_STREAM_WRITE_VALUE_DEFAULT));
+      NVTE_CHECK_CUDA_DRIVER(muStreamWriteValue64(
+                                  (MUstream)_stream_comm,
+                                  (MUdeviceptr)my_gpu_flag_rs,
+                                  0,
+                                  MUstreamWriteValue_flags::MU_STREAM_WRITE_VALUE_DEFAULT));
+    }
   }
   NVTE_CHECK_CUDA(musaEventRecord(_stop_comm, _stream_comm));
   NVTE_CHECK_CUDA(musaStreamWaitEvent(stream_main, _stop_comm, 0));

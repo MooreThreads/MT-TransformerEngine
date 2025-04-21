@@ -691,6 +691,7 @@ def _main(opts):
                     extra_output=None,
                     bulk_overlap=opts.bulk_overlap,
                 )
+                torch.musa.synchronize()
                 only_gemm_end_events[i].record()
                 rs_out, _ = te.distributed.reduce_scatter_along_first_dim(out, tp_group)
                 # print(f"ring_exchange or pipline rs no overlap: batch_size={opts.batch_size}, seq_len={opts.seq_length}, num_heads={opts.num_heads}, head_size={opts.head_dim}, gemm_inp.shape={gemm_inp.shape}, kernel_t.shape={kernel_t.shape}, out.shape={out.shape}, rs_out.shape={rs_out.shape}")
