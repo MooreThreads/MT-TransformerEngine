@@ -296,7 +296,7 @@ class _moe_permute_mask_map(torch.autograd.Function):
             output, permuted_probs = tex.moe_permute_mask(
                 dtype,
                 inp,
-                row_id_map_non_trans,
+                row_id_map,
                 probs,
                 num_tokens,
                 num_experts,
