@@ -447,7 +447,10 @@ class QuantizedTensor(torch.Tensor):
         dtype = dtype if dtype is not None else tensor.dtype
         kwargs = tensor.get_metadata()
         if data is not None:
-            kwargs["data"] = data
+            if "rowwise_data" in kwargs:
+                kwargs["rowwise_data"] = data
+            else:
+                kwargs["data"] = data
         return cls(shape=shape, dtype=dtype, requires_grad=requires_grad, **kwargs)
 
     def to_dtype(self, dtype: torch.dtype) -> QuantizedTensor:

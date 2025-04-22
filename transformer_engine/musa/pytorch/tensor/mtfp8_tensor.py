@@ -64,6 +64,30 @@ class MTFP8Quantizer(Quantizer):
         dst._fp8_dtype = self.dtype
 
         return dst
+    
+    def get_scale_shape(self, shape: Iterable[int], columnwise: bool) -> Tuple[int, int]:
+        """Calculate the shape of the scaling tensor for blockwise quantization.
+
+        This method determines the shape of the scaling tensor needed for blockwise quantization,
+        taking into account the input tensor shape and whether columnwise scaling is used.
+        The scales are padded to multiples of 4 on the inner dimension for compatibility with GEMM.
+
+        Parameters
+
+        """
+        M, K = 1, 1
+        for i in range(len(shape) - 1):
+            M *= shape[i]
+        if len(shape) > 0:
+            K = shape[-1]
+
+        def ceil_div(a, b):
+            return (a + b - 1) // b
+        
+        outer = ceil_div(M, self.block_m)
+        inner = ceil_div(K, self.block_n)
+
+        return (outer, inner)
 
     def make_empty(
         self,
@@ -113,6 +137,18 @@ class MTFP8Quantizer(Quantizer):
 
     def calibrate(self, tensor: torch.Tensor) -> None:
         pass
+
+    def __repr__(self):
+        return (
+            f"{self.__class__.__name__}("
+            f"rowwise_usage={self.rowwise_usage}, "
+            f"columnwise_usage={self.columnwise_usage}, "
+            f"internal={self.internal}, "
+            f"block_m={self.block_m}, "
+            f"block_n={self.block_n}, "
+            f"dtype={self.dtype}, "
+            ")"
+        )
 
 
 class MTFP8Tensor(MTFP8TensorBase, QuantizedTensor):

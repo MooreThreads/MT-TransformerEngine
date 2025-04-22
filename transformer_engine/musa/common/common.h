@@ -422,6 +422,14 @@ struct TypeInfo {
     }                                                               \
   }
 
+#define TRANSFORMER_ENGINE_SWITCH_CONDITION(CONDITION, FLAG, ...) \
+  if (CONDITION) {                                                \
+    constexpr bool FLAG = true;                                   \
+    { __VA_ARGS__ }                                               \
+  } else {                                                        \
+    constexpr bool FLAG = false;                                  \
+    { __VA_ARGS__ }                                               \
+  }
 ////////////////////////////////////////////////////////////////////////////////////////////////////
 
 inline int log2_ceil(int value) {

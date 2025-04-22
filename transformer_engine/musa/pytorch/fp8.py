@@ -17,6 +17,7 @@ from transformer_engine.pytorch.fp8 import (
 )
 from .tensor.mtfp8_tensor import (
     MTFP8Quantizer,
+    MTFP8Tensor
 )
 from transformer_engine.pytorch.utils import get_device_compute_capability
 
@@ -54,8 +55,13 @@ def common_recipe___init___workaround():
     from transformer_engine.common import recipe
     add_attr(recipe, "MTFP8BlockScaling", MTFP8BlockScaling)
     add_attr(recipe.Recipe, "mtfp8", musa_recipe_mtfp8)
+    replace_attr(recipe, "MXFP8BlockScaling", MTFP8BlockScaling)
 common_recipe___init___workaround()
 
+def replace_mtfp8_tensor():
+    from transformer_engine.pytorch.tensor import mxfp8_tensor
+    replace_attr(mxfp8_tensor, "MXFP8Tensor", MTFP8Tensor)
+replace_mtfp8_tensor()
 
 class MTFP8BlockScalingRecipeState(RecipeState):
     recipe: MTFP8BlockScaling
@@ -166,7 +172,7 @@ def musa_restore_fp8_meta_tensors(fp8_meta: Dict[str, Any]) -> None:
 
 def musa_get_default_fp8_recipe() -> Recipe:
     """FP8 recipe with default args."""
-    if not os.getenv("FP8_PER_TENSOR", True):
+    if os.getenv("FP8_PER_BLOCK", False):
         return MTFP8BlockScaling()
     return DelayedScaling()
 
