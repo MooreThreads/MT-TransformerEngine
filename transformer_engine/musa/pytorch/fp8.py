@@ -161,8 +161,28 @@ def musa_copy_forward_fp8_meta_tensors_for_recompute(cls, fp8_meta: Dict[str, An
 def musa_get_old_fp8_meta_tensors_for_recompute(cls, fp8_meta: Dict[str, Any]) -> None:
     if fp8_meta["recipe"].mtfp8():
         return
-    cls._orig_get_old_fp8_meta_tensors_for_recompute(fp8_meta)
+    #HACK(huang.huang): not call _orig_get_old_fp8_meta_tensors_for_recompute directly while needs
+    #to modify the ori implement of get_old_fp8_meta_tensors_for_recompute;
+    #add .clone() when save meta into updated*, otherwise updated tensor will change along with meta and cause precision issue
+    if not int(os.getenv("USE_RECOMPUTE_VARIANCE", 0)):
+        cls._orig_get_old_fp8_meta_tensors_for_recompute(fp8_meta)
+    else:
+        # below is revised vesrion of ori get_old_fp8_meta_tensors_for_recompute
+        if fp8_meta["recipe"].mxfp8():
+            return
 
+        # Store updated amaxes and scales from phase 1 post forward.
+        fp8_meta["updated_amax_history_fwd"] = fp8_meta["scaling_fwd"].amax_history.clone()
+        fp8_meta["updated_scale_fwd"] = fp8_meta["scaling_fwd"].scale.clone()
+
+        # Retrieve stashed amaxes and scales from phase 1 pre forward.
+        buffer_position_key = "global_fp8_buffer_pos_fwd_recompute"
+        stashed_fp8_meta = cls.fp8_tensors_recompute_buffer[fp8_meta[buffer_position_key]].popleft()
+
+        # Replace amaxes and scales with stashed values for phase 2 forward
+        fp8_meta["scaling_fwd"].amax_history.copy_(stashed_fp8_meta[0])
+        fp8_meta["scaling_fwd"].scale.copy_(stashed_fp8_meta[1])
+    #HACK(huang.huang)
 
 def musa_restore_fp8_meta_tensors(fp8_meta: Dict[str, Any]) -> None:
     if fp8_meta["recipe"].mtfp8():
@@ -176,6 +196,19 @@ def musa_get_default_fp8_recipe() -> Recipe:
         return MTFP8BlockScaling()
     return DelayedScaling()
 
+#HACK(huang.huang): add flag `skip` to change the behavior of reduce which is not necessary in recompute
+# TE will reduce amx history once exit a recompute context in forward and backward, we move them to the end of forward and backward,
+# the corresponding call is in megatron/core/pipeline_parallel/schedules.py
+@classmethod
+def musa_reduce_and_update_fp8_tensors(
+    cls,
+    forward: bool = True,
+    skip: bool = True,
+) -> None:
+    if skip:
+        return
+    cls._orig_reduce_and_update_fp8_tensors(forward)
+#HACK(huang.huang)
 
 def pytorch_fp8_workaround():
     from transformer_engine.pytorch import fp8
@@ -202,6 +235,12 @@ def pytorch_fp8_workaround():
         "restore_fp8_meta_tensors",
         musa_restore_fp8_meta_tensors,
     )
+    if int(os.getenv("USE_RECOMPUTE_VARIANCE", 0)):
+        wrap_attr(
+            fp8.FP8GlobalStateManager,
+            "reduce_and_update_fp8_tensors",
+            musa_reduce_and_update_fp8_tensors,
+        )
     replace_attr(fp8, "get_default_fp8_recipe", musa_get_default_fp8_recipe)
 
 
