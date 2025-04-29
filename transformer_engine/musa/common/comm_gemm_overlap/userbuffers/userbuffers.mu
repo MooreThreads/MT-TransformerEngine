@@ -1385,7 +1385,9 @@ __global__ void __launch_bounds__(MAX_THREADS)
   musaLaunchConfig_t cfg = {sms, threads, 0, stream, NULL, 0};                       \
   cfg.numAttrs = 0;
 
-#if (MUSART_VERSION >= 12030)
+// TODO Temporarily disable CompletionEvent
+// #if (MUSART_VERSION >= 12030)
+#if 0
 #define ADD_LAUNCH_COMPLETION_EVENT(attribute_ub, comm_launch_event) \
   attribute_ub[2].id = musaLaunchAttributeLaunchCompletionEvent;     \
   attribute_ub[2].val.launchCompletionEvent.event = comm_launch_event;
