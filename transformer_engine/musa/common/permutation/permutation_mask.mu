@@ -90,9 +90,8 @@ __global__ void permute_with_mask_map(MUtensorDescriptor out_dev_tensorDesc,
   __musa::memcpy_async(bar, smem, &in_dev_tensorDesc, ld_dim, ld_pos, trans_count, 0, 3, 1);
   unsigned phase_id = bar.arrive();
 
-  int tme_wait_flag = 0;
-
   bar_map.wait(phase_id_map);
+  bar.wait(phase_id);
   IdxVec dst_row_vec;
   for (int expert_id = 0; expert_id < num_experts; expert_id += 4) {
     dst_row_vec.load_from(smem_map + expert_id);
@@ -101,10 +100,6 @@ __global__ void permute_with_mask_map(MUtensorDescriptor out_dev_tensorDesc,
       if (dst_row_vec.data.elt[i] != -1) {
         int st_dim = hidden_size;
         int st_pos = dst_row_vec.data.elt[i] * hidden_size;
-        if (tme_wait_flag == 0) {
-          bar.wait(phase_id);
-          tme_wait_flag++;
-        }
         __musa::memcpy(smem, &out_dev_tensorDesc, st_dim, st_pos);
         if constexpr (with_permuted_probs) {
           if (tidx == 0) {
