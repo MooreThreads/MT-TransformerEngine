@@ -379,9 +379,8 @@ void CommOverlapBase::bulk_overlap(const TensorWrapper &A, bool transa, const Te
     for (int i = 0; i < _tp_size - 1; i++) {
       NVTE_CHECK_CUDA(musaStreamWaitEvent((musaStream_t)_stream_comm_ce[i], _start_comm, 0));
     }
-  } else {
-    NVTE_CHECK_CUDA(musaStreamWaitEvent((musaStream_t)_stream_comm, _start_comm, 0));
   }
+  NVTE_CHECK_CUDA(musaStreamWaitEvent((musaStream_t)_stream_comm, _start_comm, 0));
 
   // Communication: AG and RS
   int comm_elements = (_ubuf.numel() / 2) * _ubuf.element_size();  // UBUF uses 2Byte element size
@@ -651,14 +650,12 @@ void CommOverlapBase::split_overlap_rs(const TensorWrapper &A, bool transa, cons
                        _stream_compute[i % _stream_compute.size()]);
 
       NVTE_CHECK_CUDA(musaEventRecord(_start_comm, _stream_compute[i % _stream_compute.size()]));
-      // NVTE_CHECK_CUDA(musaStreamWaitEvent(_stream_comm, _start_comm, 0));
       if (_use_ce) {
         for (int j = 0; j < _tp_size - 1; j++) {
           NVTE_CHECK_CUDA(musaStreamWaitEvent((musaStream_t)_stream_comm_ce[j], _start_comm, 0));
         }
-      } else {
-        NVTE_CHECK_CUDA(musaStreamWaitEvent((musaStream_t)_stream_comm, _start_comm, 0));
       }
+      NVTE_CHECK_CUDA(musaStreamWaitEvent((musaStream_t)_stream_comm, _start_comm, 0));
 
       // Communication chunk. Uses MAX_SM at the last chunk
       if (i == _num_splits - 1) {
