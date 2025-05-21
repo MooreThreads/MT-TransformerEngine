@@ -158,37 +158,51 @@ def musa_copy_forward_fp8_meta_tensors_for_recompute(cls, fp8_meta: Dict[str, An
 
 
 @classmethod
-def musa_get_old_fp8_meta_tensors_for_recompute(cls, fp8_meta: Dict[str, Any]) -> None:
+def musa_get_old_fp8_meta_tensors_for_recompute(cls, fp8_meta: Dict[str, Any], quantizers=None) -> None:
     if fp8_meta["recipe"].mtfp8():
         return
+    # [Previous Version HACK - Preserved for historical context]
     #HACK(huang.huang): not call _orig_get_old_fp8_meta_tensors_for_recompute directly while needs
     #to modify the ori implement of get_old_fp8_meta_tensors_for_recompute;
     #add .clone() when save meta into updated*, otherwise updated tensor will change along with meta and cause precision issue
+    #
+    # [New Optimization HACK - Pointer Swap for D2D Overhead]
+    #Replace clone()/copy() with pointer swapping to avoid D2D transfers (~100μs each).
+    #
+    # [New Fix HACK - change scale in quantizer instead of fp8_meta]
+    #Set the stash scale to the quantizer, as the scale used in the cast is actually the scale saved in quantizer, not fp8_meta
+    #On the other hand, since scale in quantizer and fp8_meta are not same ptr after pointer swapping, it's not necessary to save fp8_meta.
+    #Since we only update scale with amax once forward_step or backward_step finished, it's okay to temporarily decouple fp8_meta and quantizer    
     if not int(os.getenv("USE_RECOMPUTE_VARIANCE", 0)):
         cls._orig_get_old_fp8_meta_tensors_for_recompute(fp8_meta)
     else:
         # below is revised vesrion of ori get_old_fp8_meta_tensors_for_recompute
-        if fp8_meta["recipe"].mxfp8():
-            return
-
-        # Store updated amaxes and scales from phase 1 post forward.
-        fp8_meta["updated_amax_history_fwd"] = fp8_meta["scaling_fwd"].amax_history.clone()
-        fp8_meta["updated_scale_fwd"] = fp8_meta["scaling_fwd"].scale.clone()
 
         # Retrieve stashed amaxes and scales from phase 1 pre forward.
         buffer_position_key = "global_fp8_buffer_pos_fwd_recompute"
         stashed_fp8_meta = cls.fp8_tensors_recompute_buffer[fp8_meta[buffer_position_key]].popleft()
 
         # Replace amaxes and scales with stashed values for phase 2 forward
-        fp8_meta["scaling_fwd"].amax_history.copy_(stashed_fp8_meta[0])
-        fp8_meta["scaling_fwd"].scale.copy_(stashed_fp8_meta[1])
+        for i, quantizer in enumerate(quantizers["scaling_fwd"]):
+            quantizer.amax_history = stashed_fp8_meta[0][0][i]
+            quantizer.scale = stashed_fp8_meta[1][i]
     #HACK(huang.huang)
 
-def musa_restore_fp8_meta_tensors(fp8_meta: Dict[str, Any]) -> None:
+def musa_restore_fp8_meta_tensors(fp8_meta: Dict[str, Any], quantizers=None) -> None:
     if fp8_meta["recipe"].mtfp8():
         return
-    FP8GlobalStateManager._orig_restore_fp8_meta_tensors(fp8_meta)
-
+    #HACK(huang.huang): Replace clone()/copy() with pointer swapping to avoid D2D transfers (~100μs each),
+    # worked with musa_get_old_fp8_meta_tensors_for_recompute
+    # [New Fix HACK - change scale in quantizer instead of fp8_meta]
+    # restore scale in quantizer from fp8_meta 
+    if not int(os.getenv("USE_RECOMPUTE_VARIANCE", 0)):
+        FP8GlobalStateManager._orig_restore_fp8_meta_tensors(fp8_meta)
+    else:
+        # below is revised vesrion of ori restore_fp8_meta_tensors
+        for i, quantizer in enumerate(quantizers["scaling_fwd"]):
+            quantizer.amax_history = fp8_meta["scaling_fwd"].amax_history[0][i]
+            quantizer.scale = fp8_meta["scaling_fwd"].scale[i]
+    ##HACK(huang.huang)
 
 def musa_get_default_fp8_recipe() -> Recipe:
     """FP8 recipe with default args."""
