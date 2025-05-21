@@ -24,11 +24,18 @@ const auto empty_mu_tensor = at::musa::CreateEmptyMUTensor();
 std::once_flag init_flag;
 musaStream_t compute_streams[num_streams];
 musaEvent_t cublas_event[num_streams];
+bool multistream_to_use;
 
 void init_streams_and_events() {
   for (int i = 0; i < num_streams; i++) {
     NVTE_CHECK_CUDA(musaStreamCreateWithPriority(&compute_streams[i], musaStreamNonBlocking, -1));
     NVTE_CHECK_CUDA(musaEventCreate(&cublas_event[i]));
+  }
+  
+  multistream_to_use = false;
+  if (std::getenv("MULTI_STREAM_GROUPGEMM") != nullptr
+      && std::string(std::getenv("MULTI_STREAM_GROUPGEMM")) == "1") {
+    multistream_to_use = true;
   }
 }
 
@@ -350,20 +357,27 @@ void nvte_multi_stream_cublas_gemm(
     NVTE_CHECK_CUDA(musaStreamWaitEvent(compute_streams[s], cublas_event[0]));
   }
 
-  std::call_once(init_flag, init_streams_and_events);
-
   for (int i = 0; i < num_gemms; i++) {
+    musaStream_t stream_to_use;
+    if (multistream_to_use) {
+      stream_to_use = compute_streams[i % num_streams];
+    } else {
+      stream_to_use = musaStreamDefault;
+    }
+
     mudnn_gemm(
         A[i], B[i], D[i], bias[i], pre_gelu_out[i], transa, transb, grad,
         workspace[i % num_streams], accumulate, use_split_accumulator, math_sm_count,
-        compute_streams[i % num_streams]); // compute_streams[i % num_streams]
+        stream_to_use); // compute_streams[i % num_streams]
   }
-  // record events on compute streams
-  for (int s = 0; s < num_stream_used; s++) {
-    NVTE_CHECK_CUDA(musaEventRecord(cublas_event[s], compute_streams[s]));
-  }
-  // wait for all compute streams to finish
-  for (int s = 0; s < num_stream_used; s++) {
-    NVTE_CHECK_CUDA(musaStreamWaitEvent(stream, cublas_event[s]));
+  if (multistream_to_use) {
+    // record events on compute streams
+    for (int s = 0; s < num_stream_used; s++) {
+      NVTE_CHECK_CUDA(musaEventRecord(cublas_event[s], compute_streams[s]));
+    }
+    // wait for all compute streams to finish
+    for (int s = 0; s < num_stream_used; s++) {
+      NVTE_CHECK_CUDA(musaStreamWaitEvent(stream, cublas_event[s]));
+    }
   }
 }
