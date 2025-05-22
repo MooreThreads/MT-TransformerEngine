@@ -37,7 +37,8 @@ def TransformerEngineBaseModule_prepare_forward(
     just in case. The autocast exit will pick up the most recent one.
     """
     if not int(os.getenv("USE_RECOMPUTE_VARIANCE", 0)):
-        self._ori_prepare_forward(inp, num_gemms, allow_non_contiguous)
+        with self._orig_prepare_forward(inp, num_gemms, allow_non_contiguous) as processed_inp:
+            yield processed_inp
     else:
         # Activation recomputation is used and this is the second forward phase.
         if self.fp8 and in_fp8_activation_recompute_phase():
