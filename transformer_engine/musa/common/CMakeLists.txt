@@ -15,6 +15,10 @@ list(APPEND CMAKE_MODULE_PATH "${MUSA_DIR}/lib/cmake/mudnn")
 find_package(MUSA REQUIRED)
 string(APPEND MUSA_MCC_FLAGS " -std=c++${CMAKE_CXX_STANDARD}")
 string(APPEND MUSA_MCC_FLAGS " --offload-arch=mp_${MUSA_ARCH}")
+# -mllvm -mtgpu-tempint-prealloc=1 just work for MUSA_ARCH=31
+if (MUSA_ARCH STREQUAL "31")
+  string(APPEND MUSA_MCC_FLAGS " -mllvm -mtgpu-tempint-prealloc=1")
+endif()
 set(MUSA_VERBOSE_BUILD ON)
 set(MUSA_LINK_LIBRARIES_KEYWORD PUBLIC)
 
