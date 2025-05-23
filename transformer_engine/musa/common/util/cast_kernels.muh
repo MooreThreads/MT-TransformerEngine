@@ -1158,13 +1158,21 @@ void fp8_quantize_arch_ge_100(const Tensor &input, const Tensor *act_input, cons
   */
 }
 
+extern void no_fp8_grad_bias(
+    const Tensor* gradO,
+    bool trans,
+    const Tensor* gradB,
+    musaStream_t stream);
+
 // Supported by the Arch < 10.0
 template <bool IS_DBIAS, bool IS_DACT, bool IS_ACT, typename ParamOP,
           float (*OP)(float, const ParamOP &)>
 void fp8_quantize_arch_l_100(const Tensor &input, const Tensor *act_input, const Tensor *noop,
                              Tensor *output, Tensor *dbias, Tensor *workspace,
                              musaStream_t stream) {
-  if (!is_delayed_tensor_scaling(output->scaling_mode) || IS_DBIAS) {
+  if constexpr (IS_DBIAS) {
+    no_fp8_grad_bias(&input, true, dbias, stream);
+  } else if (!is_delayed_tensor_scaling(output->scaling_mode) || IS_DBIAS) {
     NVTE_ERROR("Not implemented scaling mode: " + to_string(output->scaling_mode) +
                " on GPU with compute capability < 10.0.");
   }
