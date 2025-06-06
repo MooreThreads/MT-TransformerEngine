@@ -53,6 +53,8 @@ from ..tensor.quantized_tensor import (
     restore_from_saved,
 )
 from ..tensor.mxfp8_tensor import MXFP8Quantizer
+from ..tensor._internal.float8_tensor_base import Float8TensorBase
+from ..tensor.float8_tensor import Float8Quantizer
 from ..cpu_offload import is_cpu_offload_enabled, set_offloading_param
 
 from ..cpp_extensions import (
@@ -201,6 +203,13 @@ class _LayerNormLinear(torch.autograd.Function):
                 with_quantized_all_gather = False
             if fp8:
                 input_quantizer.set_usage(rowwise=True, columnwise=False)
+                if not isinstance(ln_out, Float8TensorBase):
+                    assert isinstance(input_quantizer, Float8Quantizer)
+                    init_columnwise_usage = input_quantizer.columnwise_usage
+                    input_quantizer.set_usage(columnwise=False)
+                    ln_out = input_quantizer(ln_out)
+                    input_quantizer.set_usage(columnwise=init_columnwise_usage)
+
             ln_out_total, _ = gather_along_first_dim(
                 ln_out,
                 tp_group,
@@ -491,8 +500,8 @@ class _LayerNormLinear(torch.autograd.Function):
                     # Overlap dgrad reduce-scatter with wgrad compute
                     ub_obj_wgrad = get_ub(ctx.ub_name + "_wgrad")
                     ub_type_wgrad = tex.CommOverlapType.RS
-                    ub_obj_wgrad.set_buffer_params(ctx.grad_input_quantizer)
-                    dgrad_bulk = ub_obj_wgrad.get_buffer(ctx.grad_input_quantizer)
+                    ub_obj_wgrad.set_buffer_params(None) # ce doesnt support fp8 #ctx.grad_input_quantizer
+                    dgrad_bulk = ub_obj_wgrad.get_buffer(None) # ctx.grad_input_quantizer
 
             if ctx.grad_output_quantizer is not None:
                 ctx.grad_output_quantizer.set_usage(rowwise=True, columnwise=True)

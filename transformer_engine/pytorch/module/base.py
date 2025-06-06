@@ -154,6 +154,7 @@ def initialize_ub(
     else:
         # Bootstrapping with torch.distributed API, so check backend and construct
         # intra/inter-node process groups...
+        bootstrap_backend = "mccl"
         assert (
             torch.distributed.is_initialized()
         ), "torch.distributed must be initialized before Userbuffers"
@@ -168,6 +169,7 @@ def initialize_ub(
                 "gloo",
                 "mpi",
                 "nccl",
+                "mccl",
             ], "Invalid torch.distributed backend for bootstrapping Userbuffers!"
             assert torch.distributed.is_backend_available(bootstrap_backend), (
                 f"PyTorch must be compiled with '{bootstrap_backend}' support in order to "
