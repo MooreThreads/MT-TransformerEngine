@@ -72,7 +72,7 @@ from transformer_engine.pytorch.attention import (
 # which will return [coreattention_output, lse, ...] instead of coreattention_output only; 
 # and will seperate the execution of the sdp_kernel from other operations before and after it
 _MIN_MUSA_DIM = 64
-_MAX_MUSA_DIM = 128
+_MAX_MUSA_DIM = 192
 def flash_attn_varlen_func_variance(
     q,
     k,
@@ -150,7 +150,7 @@ def flash_attn_varlen_func_variance(
     # but the input of sdp is [bs, nheads, seq_len, head_dim]
     # seq_len = max_seqlen_q
     # bs = q.shape[0] // seq_len
-    head_dim= v.shape[-1]
+    head_dim= q.shape[-1]
     if head_dim >= _MIN_MUSA_DIM and head_dim <= _MAX_MUSA_DIM:
         with torch.backends.cuda.sdp_kernel(enable_flash=True, enable_math=False):
             attn_output = torch.ops.aten._scaled_dot_product_attention_flash_musa(
@@ -346,9 +346,9 @@ def DotProductAttention__init__(
 
 # HACK(huang.huang): recompute-variance for fa: add functions "forward_fa", "forward_after_fa", "forward_before_fa" for DotProductAttention
 def FlashAttention_forward_after_fa(self, output, qkv_format, indices_q, batch_size, attn_mask_type, max_seqlen_q, q_shape, v_shape):
-    seq_len = max_seqlen_q
-    bs = q_shape[1] // seq_len
-    output = output[0].transpose(1, 2).contiguous().view(bs * seq_len, q_shape[-2], v_shape[-1]) #core_output, args*
+    bs = q_shape[0]
+    q_seq_len = q_shape[1]
+    output = output[0].transpose(1, 2).contiguous().view(bs, q_seq_len, q_shape[-2], v_shape[-1]) #core_output, args*
     if qkv_format in ["sbhd", "bshd"] and "padding" in attn_mask_type:
         output = UnpackTensor.apply(indices_q, batch_size * max_seqlen_q, output)
 
@@ -597,13 +597,14 @@ def FlashAttention_forward_before_fa(
         # transpose before fa, which will be saved for bwd
         bs = query_layer.shape[0]
         seq_len = query_layer.shape[1]
+        kv_seq_len = key_layer.shape[1]
         # seq_len = max_seqlen_q
         # bs = query_layer.shape[0] // seq_len
         q_shape = query_layer.shape
         v_shape = value_layer.shape
         query_layer = query_layer.view(bs, seq_len, query_layer.shape[-2], query_layer.shape[-1]).transpose(1, 2)
-        key_layer = key_layer.view(bs, seq_len, key_layer.shape[-2], key_layer.shape[-1]).transpose(1, 2)
-        value_layer = value_layer.view(bs, seq_len, value_layer.shape[-2], value_layer.shape[-1]).transpose(1, 2)
+        key_layer = key_layer.view(bs, kv_seq_len, key_layer.shape[-2], key_layer.shape[-1]).transpose(1, 2)
+        value_layer = value_layer.view(bs, kv_seq_len, value_layer.shape[-2], value_layer.shape[-1]).transpose(1, 2)
 
         return (
             query_layer,  
