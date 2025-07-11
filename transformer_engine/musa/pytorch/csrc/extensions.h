@@ -117,7 +117,13 @@ std::vector<py::object> fused_multi_quantize(std::vector<py::handle> input_list,
                                              std::optional<std::vector<py::handle>> output_list,
                                              std::vector<py::handle> quantizer_list,
                                              transformer_engine::DType otype);
-
+namespace transformer_engine::pytorch {
+std::vector<py::object> fused_multi_quantize_batch_init(std::vector<py::handle> input_list,
+                                            size_t hidden_dim,
+                                            std::vector<int> m_splits,
+                                            std::vector<py::handle> quantizer_list,
+                                            transformer_engine::DType otype);
+                                            }
 at::Tensor fp8_transpose(at::Tensor input, transformer_engine::DType otype,
                          std::optional<at::Tensor> output = std::nullopt);
 

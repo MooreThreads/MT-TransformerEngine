@@ -199,7 +199,8 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
   m.def("rmsnorm_bwd", &rmsnorm_bwd, "Backward of RMSNorm");
   m.def("fused_multi_quantize", &fused_multi_quantize, "Fused Multi-tensor Cast + Transpose",
         py::arg("input_list"), py::arg("output_list"), py::arg("quantizer_list"), py::arg("otype"));
-
+  m.def("fused_multi_quantize_batch_init", &transformer_engine::pytorch::fused_multi_quantize_batch_init, "Fused Multi-tensor Init + Cast + Transpose",
+        py::arg("input_list"),py::arg("hidden_dim"), py::arg("m_splits"),  py::arg("quantizer_list"), py::arg("otype"));
   m.def("te_general_grouped_gemm", &te_general_grouped_gemm, "Grouped GEMM");
   m.def("fused_attn_fwd", &fused_attn_fwd,
         "Fused Attention FP8/BF16/FP16 FWD with separate Q, K and V");

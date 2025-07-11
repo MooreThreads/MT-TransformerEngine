@@ -66,7 +66,7 @@ void init_float8_extension();
 void init_mxfp8_extension();
 
 namespace detail {
-
+inline bool IsFloat8Quantizers(PyObject *obj) { return Py_TYPE(obj) == Float8QuantizerClass; }
 inline bool IsFloat8QParams(PyObject *obj) { return Py_TYPE(obj) == Float8QuantizerClass; }
 
 inline bool IsFloat8Tensor(PyObject *obj) {
