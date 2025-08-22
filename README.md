@@ -1,6 +1,6 @@
 # Introduction
 MT-TransformerEngine is a high-performance deep learning framework developed by the Moore Threads AI-Infra Team. Built upon [TransformerEngine](https://github.com/NVIDIA/TransformerEngine) and [torch_musa](https://github.com/MooreThreads/torch_musa), MT-TransformerEngine delivers optimized support for FP8 training on Moore Threads GPUs. When integrated with [MT-Megatron](https://github.com/MooreThreads/MT-MegatronLM/tree/main), MT-TransformerEngine enables:
-- FP8 training on Moore Threads GPUs
+- FP8 training recipe on Moore Threads GPUs. And we provide the same FP8 training strategy as the DeepSeek-v3 with the **MTFP8BlockScalingRecipeState** in transformer_engine/musa/pytorch/fp8.py.
 - Scalable large-model training across clusters of thousands of GPUs. For detailed introduction on large model training, refer to the [MT-Megatron](https://github.com/MooreThreads/MT-MegatronLM/tree/main).
 
 # Installation
@@ -60,13 +60,3 @@ If you find any problems for large model training using MT-TE, please open an is
 
 ### Contributions
 **Welcome any form of contribution of code and document!**
-
-### Collaboration
-Scan WeiXin QR code to join the group and discuss with us.
-
-# Join Our Team
-If you're passionate about:
-- Large-scale models for MoE, Reinforcement Learning, Multi-Modal
-- GPU/GPU-Cluster Training/Inference performance optimization
-
-Feel free to reach out to yehua.zhang@mthreads.com.
