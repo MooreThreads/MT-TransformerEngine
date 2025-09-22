@@ -336,7 +336,11 @@ std::optional<std::vector<at::Tensor>> te_general_grouped_gemm(
     auto dtype = GetATenDType(D_type);
     auto opts = torch::TensorOptions().dtype(dtype).device(c10::kPrivateUse1);
     if (single_output) {
-      out_tensor = at::from_blob(output_data_ptr, D_shape, opts);
+      bool hasZeroDim = std::any_of(D_shape.begin(), D_shape.end(), 
+                          [](int64_t value) { return value == 0; });
+      if (!hasZeroDim) {
+        out_tensor = at::from_blob(output_data_ptr, D_shape, opts);
+      }
       char* char_ptr = reinterpret_cast<char*>(output_data_ptr);
       char_ptr += m_splits[i] * te_A.size(0) * (*D)[0].element_size();
       output_data_ptr = reinterpret_cast<void*>(char_ptr);
