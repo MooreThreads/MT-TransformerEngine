@@ -178,6 +178,15 @@ class _GroupedLinear(torch.autograd.Function):
 
             ctx.weights_shape_1 = weights[0].shape[1]
 
+            if weight_requires_grad:
+                for inputmat in inputmats:
+                    from ...musa.pytorch.tensor.mtfp8_tensor_base import MTFP8TensorBase
+                    if isinstance(inputmat, MTFP8TensorBase) and inputmat._rowwise_data.numel() != 0:
+                        inputmat._rowwise_data = None
+                        inputmat._rowwise_scale_inv = None
+            else:
+                inputmats = [None] * num_gemms
+            
             tensors_to_save, tensor_objects = prepare_for_saving(*inputmats, *weights_fp8, *biases)
             ctx.save_for_backward(*tensors_to_save)
             ctx.tensor_objects = tensor_objects

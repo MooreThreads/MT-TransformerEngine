@@ -267,10 +267,10 @@ size_t nvte_tensor_size(const NVTETensor tensor, const size_t dim) {
 
 size_t nvte_tensor_numel(const NVTETensor tensor) {
   if (tensor == nullptr) return 0;
-  const auto &t = *reinterpret_cast<const transformer_engine::Tensor *>(tensor);
+  const auto &shape = nvte_tensor_shape(tensor);
   size_t numel = 1;
-  for (auto size : t.data.shape) {
-    numel *= size;
+  for (size_t i = 0; i < shape.ndim; i++) {
+    numel *= shape.data[i];
   }
   return numel;
 }

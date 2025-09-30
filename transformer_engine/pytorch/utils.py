@@ -254,7 +254,9 @@ def non_tn_fp8_gemm_supported() -> bool:
     """Checks whether the device supports
     non-TN layouts for FP8 GEMMs.
     """
-    return torch.cuda.get_device_capability() >= (10, 0)
+    # return torch.cuda.get_device_capability() >= (10, 0)
+    # NOTE: musa device supports non-TN layouts for FP8 GEMMs.
+    return True
 
 
 @functools.lru_cache(maxsize=None)

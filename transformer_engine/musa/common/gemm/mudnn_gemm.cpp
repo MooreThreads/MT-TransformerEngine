@@ -74,9 +74,7 @@ GEMM_INFO get_gemm_info(
     return info;
   }
 
-  const auto a_data_dim_m = (a->data).shape[0];
-  const auto a_sinv_dim_m = (a->scale_inv).shape[0];
-  const bool weight_is_nn_block = (a_data_dim_m != a_sinv_dim_m);
+  const bool weight_is_nn_block = (not (a->data).shape.empty()) && ((a->data).shape[0] != (a->scale_inv).shape[0]);
 
   if (weight_is_nn_block || trans_a) {
     info.data_a = &(a->data);
