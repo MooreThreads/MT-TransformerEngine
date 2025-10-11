@@ -37,7 +37,7 @@ inline size_t ceil_div(size_t a, size_t b) {
   return (a + b - 1) / b;
 }
 
-inline __device__ float global_amax_min = 0.0001;
+inline __device__ float global_amax_min = 1e-15;
 
 template <size_t vlen>
 struct VlenTrait {
