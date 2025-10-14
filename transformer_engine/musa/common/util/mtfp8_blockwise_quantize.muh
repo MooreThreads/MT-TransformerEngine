@@ -136,6 +136,94 @@ template <
     typename IType,
     typename OType,
     typename CType>
+__global__ void fp8_nn_blockwise_n_to_1_kernel_no_align(
+    const IType* inp,
+    const CType* noop,
+    OType* out,
+    CType* sinv,
+    size_t M,
+    size_t N,
+    size_t block_m,
+    size_t block_n,
+    int row_n,
+    int col_n,
+    Param param) {
+  if (noop != nullptr && noop[0] == 1.0f) return;
+
+  const size_t tid = threadIdx.y * blockDim.x + threadIdx.x;
+  const size_t warp_id = threadIdx.y;
+  const size_t lane_id = threadIdx.x;
+
+  const size_t base_m = blockIdx.y * block_m + warp_id;
+  const size_t base_n = blockIdx.x * block_n + lane_id;
+
+  const size_t data_stride = blockDim.y * N;
+  const size_t data_base = base_m * N;
+
+  extern __shared__ __align__(alignof(CType)) CType shm[];
+  const size_t off_stride = blockDim.y * block_n;
+  const size_t off_base = warp_id * block_n + lane_id;
+
+  CType amax = 0;
+  __shared__ CType staging[max_warps_per_block];
+
+  const IType* ii = inp + data_base;
+  CType* ff = shm + off_base; 
+  size_t id_m = base_m;
+  for (int i = 0; (i < row_n) && (id_m < M); ++i, id_m+=blockDim.y, ii+=data_stride, ff+=off_stride) {
+    size_t id_n = base_n;
+    size_t ff_n = 0;
+    for (int j = 0; (j < col_n) && (id_n < N); ++j, id_n+=blockDim.x, ff_n+=blockDim.x) {
+      CType val = (CType)(OP((float)(*(ii + id_n)), param));
+      *(ff + ff_n) = val;
+      amax = fmaxf(fabsf(val), amax);
+    }
+  }
+  amax = fmaxf(amax, global_amax_min);
+
+  amax = warp_reduce_max<warp_size>(amax);
+  if (lane_id == 0) {
+    staging[warp_id] = amax;
+  }
+  __syncthreads_lm();
+
+  amax = 0;
+  if (warp_id == 0) {
+    amax = tid < blockDim.y ? staging[tid] : 0;
+    amax = warp_reduce_max<warp_size>(amax);
+  }
+  if (tid == 0) {
+    staging[0] = amax;                                              // block_amax
+    staging[1] = (CType)(Quantized_Limits<OType>::max_norm) / amax; // block_scale
+  }
+  __syncthreads_lm();
+  amax = staging[1];
+
+  OType* oo = out + data_base;
+  ff = shm + off_base; 
+  id_m = base_m;
+  for (int i = 0; (i < row_n) && (id_m < M); ++i, id_m+=blockDim.y, oo+=data_stride, ff+=off_stride) {
+    size_t id_n = base_n;
+    size_t ff_n = 0;
+    for (int j = 0; (j < col_n) && (id_n < N); ++j, id_n+=blockDim.x, ff_n+=blockDim.x) {
+      CType& tt = *(ff + ff_n);
+      tt *= amax;
+      *(oo + id_n) = (OType)(tt);
+    }
+  }
+
+  if (tid == 0) {
+    const size_t sinv_offset = blockIdx.y * gridDim.x + blockIdx.x;
+    *(sinv + sinv_offset) = staging[0] * (CType)(Quantized_Limits<OType>::max_norm_rcp);
+  }
+}
+
+template <
+    typename Param,
+    float (*OP)(float, const Param &),
+    typename IType,
+    typename OType,
+    typename CType>
 inline void fp8_blockwise_cast(
     const IType* inp,
     const CType* noop,
@@ -148,11 +236,30 @@ inline void fp8_blockwise_cast(
     Param param,
     musaStream_t stream) {
   NVTE_CHECK(block_m == block_n);
-  NVTE_CHECK(N % block_n == 0);
 
-  const int block_x = (int)(N / block_n);
+  const int block_x = (int)ceil_div(N, block_n);
   const int block_y = (int)ceil_div(M, block_m);
   dim3 blocks(block_x, block_y);
+
+  if (N % block_n != 0) {
+    // per warp per row
+    const auto col_n = ceil_div(block_n, warp_size);
+    const auto thread_x = warp_size;
+    const auto thread_y = std::min(block_m, max_warps_per_block);
+    const auto row_n = ceil_div(block_m, thread_y);
+
+    NVTE_CHECK(is_power_of_2(col_n));
+    dim3 threads((int)(thread_x), (int)(thread_y));
+
+    const size_t shm_trans = block_m * block_n * sizeof(CType);
+
+    fp8_nn_blockwise_n_to_1_kernel_no_align<Param, OP, IType, OType, CType>
+      <<<blocks, threads, shm_trans, stream>>>
+          (inp, noop, out, sinv, M, N, block_m, block_n, (int)row_n, (int)col_n, param);
+
+    NVTE_CHECK_CUDA(musaGetLastError());
+    return;
+  }
 
   constexpr size_t VLEN = io_bytes / sizeof(IType);
   const size_t thread_x = block_n / VLEN;
