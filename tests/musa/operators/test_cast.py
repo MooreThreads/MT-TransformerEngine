@@ -188,7 +188,13 @@ def create_mtfp8_groupwise_recipe_state(mode, group_size):
     return state
 
 
-def composite_groupwise_cast(src, group_size, dst_dtype):
+def composite_groupwise_cast(_src, group_size, dst_dtype):
+    assert _src.dim() == 2
+    m, n = _src.shape
+    pad_n = ceil_div(n, group_size) * group_size
+    src = torch.zeros(m, pad_n, dtype=_src.dtype, device=_src.device)
+    src[:, :n] = _src
+
     fp_max = fp8_max(dst_dtype)
     cols = src.size(-1)
     temp = src.reshape(-1, cols).float()
@@ -200,13 +206,19 @@ def composite_groupwise_cast(src, group_size, dst_dtype):
 
     dst = (temp * scale).to(dst_dtype).reshape(-1, cols)
     sinv = (amax / fp_max).reshape(-1, cols // group_size)
-    return dst, sinv
+    return dst[:, :n].contiguous(), sinv
 
 
-def composite_groupwise_uncast(x, sinv, group_size, src_dtype):
+def composite_groupwise_uncast(_x, sinv, group_size, src_dtype):
+    assert _x.dim() == 2
+    m, n = _x.shape
+    pad_n = ceil_div(n, group_size) * group_size
+    x = torch.zeros(m, pad_n, dtype=_x.dtype, device=_x.device)
+    x[:, :n] = _x
+
     orig_shape = x.shape
     res = ((x.reshape(-1, group_size)) * (sinv.reshape(-1, 1))).to(src_dtype)
-    return res.reshape(orig_shape)
+    return res.reshape(orig_shape)[:, :n].contiguous()
 
 
 def composite_groupwise_uncast_for_cast_transpose(x, sinv, group_size, src_dtype):
@@ -242,6 +254,16 @@ def composite_groupwise_uncast_for_cast_transpose(x, sinv, group_size, src_dtype
     [[180, 4096], 128],
     [[1000, 4096], 128],
     [[1581, 16384], 128],
+
+    [[16, 240], 128],
+    [[768, 640+16], 128],
+    [[256, 65664+32], 128],
+    [[2048, 2176+64], 128],
+    [[80, 1024+8], 128],
+    [[180, 4096+16], 128],
+    [[1000, 4096+32], 128],
+    [[1581, 16384+64], 128],
+    [[4096, (int)(128*85.5)], 128],
 ])
 @pytest.mark.parametrize("src_dtype", [
     torch.bfloat16,
@@ -527,4 +549,3 @@ def test_mtfp8_blockwise_cast_to_fp8(shape, src_dtype):
 
     assert torch.allclose(gold_sinv, dst_sinv, atol=1e-4, rtol=1e-4)
     assert torch.allclose(gold_t, dst_t, atol=1e-4, rtol=1e-4)
-

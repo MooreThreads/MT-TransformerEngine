@@ -141,6 +141,91 @@ template <
     float (*OP)(float, const Param &),
     typename IType,
     typename OType,
+    typename CType,
+    size_t VLEN>
+__global__ void fp8_groupwise_1_to_1_kernel_no_align(
+    const IType* inp,
+    const CType* noop,
+    OType* out,
+    CType* sinv,
+    size_t M,
+    size_t N,
+    size_t group_size,
+    size_t last_n,
+    Param param) {
+  if (noop != nullptr && noop[0] == 1.0f) return;
+
+  const int row_id = blockIdx.y * blockDim.y + threadIdx.y;
+  if (row_id >= M) return;
+
+  using IVecT = Vec<IType, VLEN>;
+  using CVecT = Vec<CType, VLEN>;
+  using OVecT = Vec<OType, VLEN>;
+
+  const int col_id = blockIdx.x;
+  const int lane_id = threadIdx.x;
+
+  const size_t row_offset = row_id * N;
+  const size_t col_offset = col_id * group_size + lane_id * VLEN;
+  const size_t data_offset = row_offset + col_offset;
+
+  const size_t sinv_offset = row_id * gridDim.x + col_id;
+
+  CType amax = 0;
+  IVecT vec_in;
+  CVecT vec_temp;
+
+  const IType* iptr = inp + data_offset;
+  const bool is_dense = (col_offset + VLEN) < N;
+
+  if (is_dense) {
+    vec_in.load_from(iptr, 0);
+#pragma unroll
+    for (size_t j = 0; j < VLEN; ++j) {
+      vec_temp.data.elt[j] = (CType)(OP((float)vec_in.data.elt[j], param));
+      amax = fmaxf(fabsf(vec_temp.data.elt[j]), amax);
+    }
+  } else {
+#pragma unroll
+    for (size_t j = 0; j < VLEN; ++j) {
+      if (col_offset + j < N) {
+        vec_temp.data.elt[j] = (CType)(OP((float)(*(iptr+j)), param));
+        amax = fmaxf(fabsf(vec_temp.data.elt[j]), amax);
+      }
+    }
+  }
+
+  amax = warp_reduce_max_broadcast(amax);
+  amax = fmaxf(amax, global_amax_min);
+  CType scale = (CType)(Quantized_Limits<OType>::max_norm) / amax;
+
+  OType* optr = out + data_offset;
+  if (is_dense) {
+    OVecT vec_out;
+#pragma unroll
+    for (size_t j = 0; j < VLEN; ++j) {
+      vec_out.data.elt[j] = (OType)(vec_temp.data.elt[j] * scale);
+    }
+    vec_out.store_to(optr, 0);
+  } else {
+#pragma unroll
+    for (size_t j = 0; j < VLEN; ++j) {
+      if (col_offset + j < N) {
+        *(optr+j) = (OType)(vec_temp.data.elt[j] * scale);
+      }
+    }
+  }
+
+  if (lane_id == 0) {
+    *(sinv + sinv_offset) = amax * (CType)(Quantized_Limits<OType>::max_norm_rcp);
+  }
+}
+
+template <
+    typename Param,
+    float (*OP)(float, const Param &),
+    typename IType,
+    typename OType,
     typename CType>
 inline void fp8_groupwise_cast(
     const IType* inp,
@@ -152,7 +237,40 @@ inline void fp8_groupwise_cast(
     size_t group_size,
     Param param,
     musaStream_t stream) {
-  NVTE_CHECK(N % group_size == 0);
+
+  if (N % group_size != 0) {
+    constexpr int thx = warp_size;
+    constexpr int thy = 8;
+    dim3 threads(thx, thy);
+
+    const int blk_x = N / group_size + 1;
+    const int blk_y = (int)ceil_div(M, (size_t)thy);
+    dim3 blocks(blk_x, blk_y);
+
+    const int last_n = (int)(N % group_size);
+
+#define DISPATCH_1_TO_1_NO_ALIGN(G, V) \
+    if (group_size == G) { \
+      constexpr size_t VLEN = V; \
+      fp8_groupwise_1_to_1_kernel_no_align<Param, OP, IType, OType, CType, VLEN> \
+          <<<blocks, threads, 0, stream>>>( \
+              inp, noop, out, sinv, M, N, group_size, last_n, param); \
+      NVTE_CHECK_CUDA(musaGetLastError()); \
+      return; \
+    }
+
+    if constexpr (sizeof(IType) == 2) {
+      DISPATCH_1_TO_1_NO_ALIGN(128, 4);
+      NVTE_ERROR("Not supported [1, ", group_size, "] blocksize for mtfp8 groupwise quantize.");
+    } else if constexpr (sizeof(IType) == 4) {
+      DISPATCH_1_TO_1_NO_ALIGN(128, 4);
+      NVTE_ERROR("Not supported [1, ", group_size, "] blocksize for mtfp8 groupwise quantize.");
+    }
+
+#undef DISPATCH_1_TO_1_NO_ALIGN
+
+    NVTE_ERROR("Not supported [1, ", group_size, "] blocksize for mtfp8 groupwise quantize.");
+  }
 
   const size_t numel = M * N;
   constexpr size_t thd_x = warp_size;
