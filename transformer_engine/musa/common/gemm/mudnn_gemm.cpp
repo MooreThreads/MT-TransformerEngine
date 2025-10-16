@@ -74,7 +74,8 @@ GEMM_INFO get_gemm_info(
     return info;
   }
 
-  const bool weight_is_nn_block = (not (a->data).shape.empty()) && ((a->data).shape[0] != (a->scale_inv).shape[0]);
+  const bool weight_is_nn_block = (not (a->data).shape.empty()) &&
+                                  (product(a->data.shape, 0, a->data.shape.size() - 1) != product(a->scale_inv.shape, 0, a->scale_inv.shape.size() - 1));
 
   if (weight_is_nn_block || trans_a) {
     info.data_a = &(a->data);
@@ -195,7 +196,7 @@ void fp8_gemm(
   }
   CHECK_MUDNN_STATUS(param.SetAmaxD(mu_amax_o), "SetAmax");
 
-  op.RunLt(h, mu_o, mu_l, mu_r, mu_o, mu_b, param, InternalMemAlloc);
+  CHECK_MUDNN_STATUS(op.RunLt(h, mu_o, mu_l, mu_r, mu_o, mu_b, param, InternalMemAlloc), "RunLt");
 }
 
 void no_fp8_grad_bias(
