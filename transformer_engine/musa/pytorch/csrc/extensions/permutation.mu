@@ -172,19 +172,21 @@ std::tuple<at::Tensor, at::Tensor> moe_unpermute_bwd(at::Tensor input_bwd, at::T
   return std::make_tuple(act_grad, prob_grad);
 }
 
+// HACK(sherry): suppport fp32/fp64 router
 std::tuple<at::Tensor, at::Tensor> moe_permute_mask(const transformer_engine::DType dtype,
                                                     at::Tensor input, at::Tensor row_id_map,
                                                     at::Tensor probs, int num_tokens,
                                                     int num_experts, int num_out_tokens,
                                                     int hidden_size) {
   using namespace transformer_engine::pytorch;
+  const transformer_engine::DType probs_dtype = GetTransformerEngineDType(probs.scalar_type());
 
   at::Tensor output =
       torch::empty({num_out_tokens, hidden_size},
-                   torch::dtype(torch::kBFloat16).device(torch::kPrivateUse1).requires_grad(false));
+                   torch::dtype(input.dtype()).device(torch::kPrivateUse1).requires_grad(false));
   at::Tensor permuted_probs =
       torch::empty({num_out_tokens},
-                   torch::dtype(torch::kBFloat16).device(torch::kPrivateUse1).requires_grad(false));
+                   torch::dtype(probs.dtype()).device(torch::kPrivateUse1).requires_grad(false));
 
   auto stream = at::musa::getCurrentMUSAStream().stream();
 
@@ -198,15 +200,21 @@ std::tuple<at::Tensor, at::Tensor> moe_permute_mask(const transformer_engine::DT
       {static_cast<size_t>(row_id_map.size(0)), static_cast<size_t>(row_id_map.size(1))},
       transformer_engine::DType::kInt64);
   auto probs_cu = makeTransformerEngineTensor(
-      probs.data_ptr(), {static_cast<size_t>(num_tokens), static_cast<size_t>(num_experts)}, dtype);
+      probs.data_ptr(), {static_cast<size_t>(num_tokens), static_cast<size_t>(num_experts)}, probs_dtype); // probs dtype
   auto permuted_probs_cu = makeTransformerEngineTensor(
-      permuted_probs.data_ptr(), {static_cast<size_t>(num_out_tokens)}, dtype);
+      permuted_probs.data_ptr(), {static_cast<size_t>(num_out_tokens)}, probs_dtype); // probs dtype
 
-  nvte_permute_mask(input_cu.data(), output_cu.data(), row_id_map_cu.data(), probs_cu.data(),
-                    permuted_probs_cu.data(), num_tokens, num_experts, num_out_tokens, hidden_size,
-                    stream);
-
-  return std::make_tuple(output, permuted_probs);
+    if(dtype == probs_dtype){
+        nvte_permute_mask(input_cu.data(), output_cu.data(), row_id_map_cu.data(), probs_cu.data(),
+                        permuted_probs_cu.data(), num_tokens, num_experts, num_out_tokens, hidden_size,
+                        stream);
+    }
+    else{
+        nvte_permute_mask_high_precision_probs(input_cu.data(), output_cu.data(), row_id_map_cu.data(), probs_cu.data(),
+                        permuted_probs_cu.data(), num_tokens, num_experts, num_out_tokens, hidden_size,
+                        stream);
+    }
+    return std::make_tuple(output, permuted_probs);
 }
 
 std::tuple<at::Tensor, at::Tensor> moe_unpermute_mask(const transformer_engine::DType dtype,
@@ -215,13 +223,14 @@ std::tuple<at::Tensor, at::Tensor> moe_unpermute_mask(const transformer_engine::
                                                       at::Tensor permuted_probs, int num_tokens,
                                                       int num_experts, int hidden_size) {
   using namespace transformer_engine::pytorch;
+  const transformer_engine::DType probs_dtype = GetTransformerEngineDType(permuted_probs.scalar_type());
 
   at::Tensor output =
       torch::empty({num_tokens, hidden_size},
-                   torch::dtype(torch::kBFloat16).device(torch::kPrivateUse1).requires_grad(false));
+                   torch::dtype(input.dtype()).device(torch::kPrivateUse1).requires_grad(false));
   at::Tensor unpermuted_probs =
       torch::empty({num_tokens, num_experts},
-                   torch::dtype(torch::kBFloat16).device(torch::kPrivateUse1).requires_grad(false));
+                   torch::dtype(permuted_probs.dtype()).device(torch::kPrivateUse1).requires_grad(false));
 
   auto stream = at::musa::getCurrentMUSAStream().stream();
 
@@ -235,20 +244,31 @@ std::tuple<at::Tensor, at::Tensor> moe_unpermute_mask(const transformer_engine::
       row_id_map.data_ptr(),
       {static_cast<size_t>(row_id_map.size(0)), static_cast<size_t>(row_id_map.size(1))},
       transformer_engine::DType::kInt64);
+
   auto merging_probs_cu = makeTransformerEngineTensor(
       merging_probs.data_ptr(), {static_cast<size_t>(num_tokens), static_cast<size_t>(num_experts)},
-      dtype);
-  auto permuted_probs_cu = makeTransformerEngineTensor(permuted_probs);
+      probs_dtype);
+//   auto permuted_probs_cu = makeTransformerEngineTensor(permuted_probs);
+  auto permuted_probs_cu = makeTransformerEngineTensor(permuted_probs.data_ptr(), {static_cast<size_t>(num_tokens), static_cast<size_t>(num_experts)},
+      probs_dtype);
   auto unpermuted_probs_cu = makeTransformerEngineTensor(
       unpermuted_probs.data_ptr(),
-      {static_cast<size_t>(num_tokens), static_cast<size_t>(num_experts)}, dtype);
+      {static_cast<size_t>(num_tokens), static_cast<size_t>(num_experts)}, probs_dtype);
 
-  nvte_unpermute_mask(input_cu.data(), output_cu.data(), row_id_map_cu.data(),
-                      merging_probs_cu.data(), permuted_probs_cu.data(), unpermuted_probs_cu.data(),
-                      num_tokens, num_experts, hidden_size, stream);
-
-  return std::make_tuple(output, unpermuted_probs);
+    if(dtype == probs_dtype){
+        nvte_unpermute_mask(input_cu.data(), output_cu.data(), row_id_map_cu.data(),
+                        merging_probs_cu.data(), permuted_probs_cu.data(), unpermuted_probs_cu.data(),
+                        num_tokens, num_experts, hidden_size, stream);
+    }else{
+        nvte_unpermute_mask_high_precision_probs(input_cu.data(), output_cu.data(), row_id_map_cu.data(),
+                        merging_probs_cu.data(), permuted_probs_cu.data(), unpermuted_probs_cu.data(),
+                        num_tokens, num_experts, hidden_size, stream);
+    }
+    return std::make_tuple(output, unpermuted_probs);
 }
+// HACK(sherry)
+
+
 
 std::tuple<at::Tensor, at::Tensor> moe_unpermute_mask_bwd_with_merging_probs(
     const transformer_engine::DType dtype, at::Tensor fwd_output_grad, at::Tensor fwd_input,
