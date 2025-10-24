@@ -51,6 +51,7 @@ __global__ void permute_with_mask_map_trans(
       }
     }
   }
+  __musa::memcpy_idf_l2();
 }
 
 template <typename Dtype, typename IdxDtype, bool with_permuted_probs = false>
@@ -112,6 +113,7 @@ __global__ void permute_with_mask_map(MUtensorDescriptor out_dev_tensorDesc,
       }
     }
   }
+  __musa::memcpy_idf_l2();
 }
 
 // input: [num_out_tokens, hidden_size]
@@ -352,12 +354,12 @@ void nvte_permute_mask_launcher(const Dtype *input, Dtype *output, IdxDtype *row
 
   if constexpr (trans_row_id_map) {
     int smem_size = hidden_size * sizeof(Dtype);
-    permute_with_mask_map_trans<Dtype, IdxDtype, with_permuted_probs><<<grid, block, smem_size>>>(
+    permute_with_mask_map_trans<Dtype, IdxDtype, with_permuted_probs><<<grid, block, smem_size, stream>>>(
         outtensorDesc, intensorDesc, row_id_map, probs, permuted_probs, num_tokens, num_experts,
         hidden_size, hidden_size, 1, hidden_size, 1, num_experts, 1, 1);
   } else {
     int smem_size = hidden_size * sizeof(Dtype) + num_experts * sizeof(IdxDtype);
-    permute_with_mask_map<Dtype, IdxDtype, with_permuted_probs><<<grid, block, smem_size>>>(
+    permute_with_mask_map<Dtype, IdxDtype, with_permuted_probs><<<grid, block, smem_size, stream>>>(
         outtensorDesc, intensorDesc, maptensorDesc, probs, permuted_probs, num_tokens, num_experts,
         hidden_size, hidden_size, 1, hidden_size, 1, num_experts, 1, 1);
   }
