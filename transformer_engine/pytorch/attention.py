@@ -1540,6 +1540,19 @@ class UnpackTensor(torch.autograd.Function):
         return None, None, pack_tensor(indices, grad_output)
 
 
+def flash_attn_p2p_communicate_sync(
+    rank, send_tensor, send_dst, recv_tensor, recv_src, cp_group, batch_p2p_comm
+):
+    """Point-to-point communications of KV and dKV in Attention with context parallelism"""
+    if rank % 2 == 0:
+        torch.distributed.send(send_tensor, send_dst, cp_group)
+        torch.distributed.recv(recv_tensor, recv_src, cp_group)
+    else:
+        torch.distributed.recv(recv_tensor, recv_src, cp_group)
+        torch.distributed.send(send_tensor, send_dst, cp_group)
+    return None
+
+
 def flash_attn_p2p_communicate(
     rank, send_tensor, send_dst, recv_tensor, recv_src, cp_group, batch_p2p_comm
 ):
@@ -2041,14 +2054,15 @@ class AttnFuncWithCPAndKVP2P(torch.autograd.Function):
         out = None
         for i in range(cp_size + 1):
             if i < cp_size:
-                with torch.cuda.stream(flash_attn_streams[i % 2]):
+                if True: # placeholder 
+                # with torch.cuda.stream(flash_attn_streams[i % 2]):
                     # wait until KV is received
-                    for req in send_recv_reqs[(i + 1) % 2]:
-                        req.wait()
+                    # for req in send_recv_reqs[(i + 1) % 2]:
+                    #     req.wait()
 
                     if i < (cp_size - 1):
                         p2p_comm_buffers[i + 1] = torch.empty_like(p2p_comm_buffers[i])
-                        send_recv_reqs[i % 2] = flash_attn_p2p_communicate(
+                        send_recv_reqs[i % 2] = flash_attn_p2p_communicate_sync(
                             rank,
                             p2p_comm_buffers[i],
                             send_dst,
@@ -2576,8 +2590,8 @@ class AttnFuncWithCPAndKVP2P(torch.autograd.Function):
 
             if i > 0:
                 # wait until fwd restuls correction of last step is done
-                if i > 1:
-                    flash_attn_streams[(i - 1) % 2].wait_event(fwd_results_correction_done)
+                # if i > 1:
+                #     flash_attn_streams[(i - 1) % 2].wait_event(fwd_results_correction_done)
 
                 if use_fused_attention:
                     # [b, np, sq, 1] -> [b, np, sq] or
@@ -2588,12 +2602,13 @@ class AttnFuncWithCPAndKVP2P(torch.autograd.Function):
                             softmax_lse_per_step[i - 1].transpose(0, 1).contiguous()
                         )
 
-                with torch.cuda.stream(flash_attn_streams[(i - 1) % 2]):
+                if True: # placeholder 
+                # with torch.cuda.stream(flash_attn_streams[(i - 1) % 2]):
                     if fp8:
                         out_per_step[i - 1] = out_per_step[i - 1].dequantize()
                     if i == 1:
                         out = torch.zeros_like(q if not fp8 else out_per_step[0]).view(q.shape)
-                        softmax_lse = torch.clone(softmax_lse_per_step[0]).to(torch.double)
+                        softmax_lse = torch.clone(softmax_lse_per_step[0]).to(torch.float32) # torch.double is not supported
                         if causal and qkv_format != "thd":
                             # [b, np, sq] -> [b, np, 2, sq//2]
                             softmax_lse_ = softmax_lse.view(
@@ -2616,10 +2631,10 @@ class AttnFuncWithCPAndKVP2P(torch.autograd.Function):
                                 softmax_lse_[..., 1, :], softmax_lse_per_step[i - 1]
                             )
 
-                if i < cp_size:
-                    flash_attn_streams[(i - 1) % 2].record_event(fwd_results_correction_done)
+                # if i < cp_size:
+                #     flash_attn_streams[(i - 1) % 2].record_event(fwd_results_correction_done)
 
-        torch.cuda.current_stream().wait_stream(flash_attn_streams[1])
+        # torch.cuda.current_stream().wait_stream(flash_attn_streams[1])
 
         second_half_lse_seqlen = None
         if causal and rank < (cp_size - 1):
@@ -2927,14 +2942,14 @@ class AttnFuncWithCPAndKVP2P(torch.autograd.Function):
 
         for i in range(cp_size):
             # wait until KV is received
-            for req in send_recv_reqs:
-                req.wait()
+            # for req in send_recv_reqs:
+            #     req.wait()
 
             send_tensor = p2p_comm_buffers[i % 2]
             recv_tensor = p2p_comm_buffers[(i + 1) % 2]
             if ctx.fp8:
                 if i < cp_size - 1:
-                    send_recv_reqs = flash_attn_p2p_communicate(
+                    send_recv_reqs = flash_attn_p2p_communicate_sync(
                         rank,
                         send_tensor[0],
                         send_dst,
@@ -2948,7 +2963,7 @@ class AttnFuncWithCPAndKVP2P(torch.autograd.Function):
                         dkv_fp8,
                         dkv_fp8_,
                         group=ctx.cp_group,
-                        async_op=True,
+                        # async_op=True,
                     )
                     send_recv_reqs = [dkv_a2a_req]
             else:
@@ -2958,7 +2973,7 @@ class AttnFuncWithCPAndKVP2P(torch.autograd.Function):
                 if i == (cp_size - 1):
                     send_tensor = send_tensor[1]
                     recv_tensor = recv_tensor[1]
-                send_recv_reqs = flash_attn_p2p_communicate(
+                send_recv_reqs = flash_attn_p2p_communicate_sync(
                     rank, send_tensor, send_dst, recv_tensor, recv_src, ctx.cp_group, batch_p2p_comm
                 )
 
@@ -3472,8 +3487,8 @@ class AttnFuncWithCPAndKVP2P(torch.autograd.Function):
                     attn_dbias_[..., 1, :, (2 * cp_size - idx - 1), :].copy_(dbias_[..., 1, :])
 
             # wait until dKV is received
-            for req in send_recv_reqs:
-                req.wait()
+            # for req in send_recv_reqs:
+            #     req.wait()
 
             if ctx.fp8:
                 if i < cp_size - 1:
