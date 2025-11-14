@@ -339,6 +339,7 @@ class Float8Tensor(Float8TensorBase, QuantizedTensor):
         self._data = torch.Tensor() if self._data is not None else None
         self._transpose = torch.Tensor() if self._transpose is not None else None
         self._transpose_invalid = True
+        self._scale_inv = torch.Tensor() if self._scale_inv is not None else None
 
     @classmethod
     def __torch_dispatch__(cls, func, types, args, kwargs=None):

@@ -440,7 +440,7 @@ class _GroupedLinear(torch.autograd.Function):
 
                 def handle_custom_ddp_from_mcore(w, wgrad):
                     if ctx.weights_requires_grad:
-                        if ctx.fuse_wgrad_accumulation and hasattr(w, "grad_added_to_main_grad"):
+                        if False and ctx.fuse_wgrad_accumulation and hasattr(w, "grad_added_to_main_grad"):
                             w.grad_added_to_main_grad = True
                             if getattr(w, "zero_out_wgrad", False):
                                 wgrad = torch.zeros(

@@ -29,10 +29,16 @@ def clear_tensor_data(*tensors: Tuple[Optional[torch.Tensor], ...]) -> None:
 
     Must be used carefully.
     """
+    from ..musa.pytorch.tensor.mtfp8_tensor_base import MTFP8TensorBase
     for t in tensors:
         if t is not None:
             if isinstance(t, QuantizedTensor):
                 t.clear()
+            elif isinstance(t, MTFP8TensorBase):
+                t._rowwise_data = torch.Tensor() if t._rowwise_data is not None else None
+                t._rowwise_scale_inv = torch.Tensor() if t._rowwise_scale_inv is not None else None
+                t._columnwise_data = torch.Tensor() if t._columnwise_data is not None else None
+                t._columnwise_scale_inv = torch.Tensor() if t._columnwise_scale_inv is not None else None
             else:
                 t.data = torch.Tensor()
             del t
