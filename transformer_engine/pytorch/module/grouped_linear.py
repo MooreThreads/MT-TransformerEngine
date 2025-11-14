@@ -323,7 +323,7 @@ class _GroupedLinear(torch.autograd.Function):
                     ]
                 else:
                     # activation dtype bf16
-                    fc1_input.requires_grad = True
+                    # fc1_input.requires_grad = True
                     inputmats_no_fp8 = torch.split(fc1_input.view(-1, ctx.in_features), ctx.m_splits)
                     inputmats = [cast_if_needed(mat, ctx.activation_dtype) for mat in inputmats_no_fp8]
 

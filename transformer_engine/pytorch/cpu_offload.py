@@ -6,7 +6,7 @@
 from __future__ import annotations
 from contextlib import nullcontext
 from typing import Any, Dict, Optional
-
+import math
 import torch
 
 from .tensor.float8_tensor import Float8Tensor
@@ -573,6 +573,8 @@ class _FineGrainedAsyncDoubleBufferGroupOffloadHandler(OffloadHandler):
 
         self.pin_memory_tensor_pool = {}
         self.to_release_tensor = {}
+        
+        self.moe_layer_pattern = []
 
 
     def is_last_layer(self):
@@ -587,6 +589,7 @@ class _FineGrainedAsyncDoubleBufferGroupOffloadHandler(OffloadHandler):
     
     
     def is_last_batch_last_layer(self):
+        # print(f"self.current_microbatch_id = {self.current_microbatch_id}, self.num_microbatches = {self.num_microbatches}, self.current_layer_id = {self.current_layer_id}, self.num_layers = {self.num_layers}")
         return self.current_microbatch_id >= self.num_microbatches - 1 and self.current_layer_id >= self.num_layers - 1
 
 
@@ -617,6 +620,18 @@ class _FineGrainedAsyncDoubleBufferGroupOffloadHandler(OffloadHandler):
             else:
                 offloading_microbatch_id = self.current_microbatch_id
                 offloading_layer_id = self.current_layer_id - 1
+                
+        for i in range(len(self.moe_layer_pattern) - 1):
+            if self.moe_layer_pattern[offloading_layer_id] == 0:
+                # is dense layer
+                if offloading_layer_id == 0:
+                    offloading_microbatch_id = offloading_microbatch_id - 1
+                    offloading_layer_id = self.num_layers - 1
+                else:
+                    offloading_layer_id = offloading_layer_id - 1
+            else:
+                # is moe layer
+                break
 
         copy_done_event = torch.cuda.Event()
         tensor_tag = (offloading_microbatch_id, offloading_layer_id, tensor_name)
@@ -635,7 +650,7 @@ class _FineGrainedAsyncDoubleBufferGroupOffloadHandler(OffloadHandler):
             existing_buffer = self.pin_memory_tensor_pool.get(pin_memory_tag)
             # existing_buffer = self.pin_memory_tensor_pool.get(tensor_tag)
             if existing_buffer is None or existing_buffer.size() < src_tensor.size():
-                buffer_shape = [token_num * 2] + list(hidden_dim)
+                buffer_shape = [math.ceil(token_num * 1.1)] + list(hidden_dim)
                 new_buffer = torch.empty(
                     buffer_shape,
                     dtype=src_tensor.dtype,
@@ -669,6 +684,20 @@ class _FineGrainedAsyncDoubleBufferGroupOffloadHandler(OffloadHandler):
             else:
                 offloading_microbatch_id = self.current_microbatch_id
                 offloading_layer_id = self.current_layer_id - 1
+                
+        for i in range(len(self.moe_layer_pattern) - 1):
+            # print(f"offloading_layer_id = {offloading_layer_id}...")
+            if self.moe_layer_pattern[offloading_layer_id] == 0:
+                # is dense layer
+                if offloading_layer_id == 0:
+                    offloading_microbatch_id = offloading_microbatch_id - 1
+                    offloading_layer_id = self.num_layers - 1
+                else:
+                    offloading_layer_id = offloading_layer_id - 1
+            else:
+                # is moe layer
+                break
+            
         tensor_tag = (offloading_microbatch_id, offloading_layer_id, tensor_name)
         # print(f"wait offload :{tensor_tag}")
         if not tensor_tag in self.to_release_tensor:
@@ -691,6 +720,19 @@ class _FineGrainedAsyncDoubleBufferGroupOffloadHandler(OffloadHandler):
             else:
                 reloading_microbatch_id = self.current_microbatch_id
                 reloading_layer_id = self.current_layer_id - 1
+                
+        for i in range(len(self.moe_layer_pattern) - 1):
+            if self.moe_layer_pattern[reloading_layer_id] == 0:
+                # is dense layer
+                if reloading_layer_id == 0:
+                    reloading_microbatch_id = reloading_microbatch_id + 1
+                    reloading_layer_id = self.num_layers - 1
+                else:
+                    reloading_layer_id = reloading_layer_id - 1
+            else:
+                # is moe layer
+                break
+            
         tensor_tag = (reloading_microbatch_id, reloading_layer_id, tensor_name)
         # print(f"launch reload :{tensor_tag}")
         if not tensor_tag in self.tensor_tag_to_state:
@@ -717,6 +759,19 @@ class _FineGrainedAsyncDoubleBufferGroupOffloadHandler(OffloadHandler):
             else:
                 reloading_microbatch_id = self.current_microbatch_id
                 reloading_layer_id = self.current_layer_id - 1
+                
+        for i in range(len(self.moe_layer_pattern) - 1):
+            if self.moe_layer_pattern[reloading_layer_id] == 0:
+                # is dense layer
+                if reloading_layer_id == 0:
+                    reloading_microbatch_id = reloading_microbatch_id + 1
+                    reloading_layer_id = self.num_layers - 1
+                else:
+                    reloading_layer_id = reloading_layer_id - 1
+            else:
+                # is moe layer
+                break        
+                
         tensor_tag = (reloading_microbatch_id, reloading_layer_id, tensor_name)
         # print(f"wait reload :{tensor_tag}")
         if not tensor_tag in self.reloading_tensor:
@@ -816,8 +871,8 @@ class FineGrainedOffloadLayerCounter(torch.autograd.Function):
     @staticmethod
     def forward(ctx, tensor):
         cpu_offload_handler = get_fine_grained_offload_handler()
-        cpu_offload_handler.current_layer_id += 1
         # print(f'finish layer forward {cpu_offload_handler.current_microbatch_id}, {cpu_offload_handler.current_layer_id}')
+        cpu_offload_handler.current_layer_id += 1
         return tensor
     
     @staticmethod
