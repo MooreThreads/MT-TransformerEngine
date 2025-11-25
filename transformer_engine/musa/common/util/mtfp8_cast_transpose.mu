@@ -92,7 +92,6 @@ __global__ void  mtfp8_cast_transpose_general_kernel_column_aligned(
     float amax_rowwise;
     float amax_columnwise[N_ELEMENTS_PER_THREAD_X] = {0.f};
 
-    input_vec_t tmp_load_reg;
     out_vec_t tmp_store_reg;
     scale_vec_t scale_store_reg;
 
@@ -111,20 +110,36 @@ __global__ void  mtfp8_cast_transpose_general_kernel_column_aligned(
                            group_inner_y_id + ii_y:
                            0;
         *reinterpret_cast<input_vec_t*>(shm[group_inner_y_id + ii_y] + local_col_base_id) = *reinterpret_cast<const input_vec_t*>(inp_load_ptr + ld_st_offset * ncols);
-        tmp_load_reg.load_from(shm[group_inner_y_id + ii_y] + local_col_base_id, 0);
         
+        // ======================= OPTIMIZATION START ========================
+        // 优化二: 重组循环以提高指令级并行 (ILP)
+        float tmp_load_float[N_ELEMENTS_PER_THREAD_X];
+        const IType* shm_ptr = shm[group_inner_y_id + ii_y] + local_col_base_id;
+        
+        // 循环 1: 从共享内存加载并转换为 float, 存入寄存器
         #pragma unroll
         for (int ii_x = 0; ii_x < N_ELEMENTS_PER_THREAD_X; ii_x++) {
-          amax_rowwise = fmaxf(fmaxf(amax_rowwise, fabsf(tmp_load_reg.data.elt[ii_x])), global_amax_min);
-          amax_columnwise[ii_x] = fmaxf(fmaxf(amax_columnwise[ii_x], fabsf(tmp_load_reg.data.elt[ii_x])), global_amax_min);
+            tmp_load_float[ii_x] = static_cast<float>(shm_ptr[ii_x]);
+        }
+        
+        // 循环 2: 在寄存器上进行 amax 计算
+        #pragma unroll
+        for (int ii_x = 0; ii_x < N_ELEMENTS_PER_THREAD_X; ii_x++) {
+          amax_rowwise = fmaxf(fmaxf(amax_rowwise, fabsf(tmp_load_float[ii_x])), global_amax_min);
+          amax_columnwise[ii_x] = fmaxf(fmaxf(amax_columnwise[ii_x], fabsf(tmp_load_float[ii_x])), global_amax_min);
         }
 
         amax_rowwise = warpReduceMax(amax_rowwise) * (float)(Quantized_Limits<OType>::max_norm_rcp);
 
+        // 优化一: 用乘法代替除法
+        const float rcp_amax_rowwise = (amax_rowwise > 0.f) ? (1.0f / amax_rowwise) : 0.f;
+
         //// write back to scale_inv and out_c [rowwise result]
         for (int ii_x = 0; ii_x < N_ELEMENTS_PER_THREAD_X; ii_x++) {
-            tmp_store_reg.data.elt[ii_x] = static_cast<OType>(float(tmp_load_reg.data.elt[ii_x]) / amax_rowwise);
+            tmp_store_reg.data.elt[ii_x] = static_cast<OType>(tmp_load_float[ii_x] * rcp_amax_rowwise);
         }
+        // ======================== OPTIMIZATION END =========================
+
         tmp_store_reg.store_to(out_c_store_ptr + ld_st_offset * ncols, 0);
         if (threadIdx.x == 0) {
           rowwise_scale_inv_ptr[ld_st_offset * rowwise_scale_inv_stride] = amax_rowwise;
@@ -151,10 +166,16 @@ __global__ void  mtfp8_cast_transpose_general_kernel_column_aligned(
     }
 
     __syncthreads_lm();
+    
+    // ======================= OPTIMIZATION START ========================
+    // 优化一: 用乘法代替除法 (Column-wise)
+    float rcp_amax_columnwise[N_ELEMENTS_PER_THREAD_X];
     #pragma unroll
     for (int ii = 0; ii < N_ELEMENTS_PER_THREAD_X; ii++) {
       amax_columnwise[ii] = (float)shm_amax_columnwise[0][local_col_base_id + ii] * (float)(Quantized_Limits<OType>::max_norm_rcp);
+      rcp_amax_columnwise[ii] = (amax_columnwise[ii] > 0.f) ? (1.0f / amax_columnwise[ii]) : 0.f;
     }
+    // ======================== OPTIMIZATION END =========================
 
     // write back to columnwise_scale_inv and out_t
     for (int loop_y_id = 0; loop_y_id < REPEAT_Y; loop_y_id++) {
@@ -166,7 +187,10 @@ __global__ void  mtfp8_cast_transpose_general_kernel_column_aligned(
                             0;
         
         for (int ii_x = 0; ii_x < N_ELEMENTS_PER_THREAD_X; ii_x++) {
-          float value = (float)shm[group_inner_y_offset][local_col_base_id + ii_x] / amax_columnwise[ii_x];
+          // ======================= OPTIMIZATION START ========================
+          // 优化一: 用乘法代替除法 (Column-wise)
+          float value = static_cast<float>(shm[group_inner_y_offset][local_col_base_id + ii_x]) * rcp_amax_columnwise[ii_x];
+          // ======================== OPTIMIZATION END =========================
           tmp_store_reg.data.elt[ii_x] = static_cast<OType>(value);
         }
         tmp_store_reg.store_to(out_t_store_ptr + store_offset * ncols, 0);
@@ -237,7 +261,6 @@ __global__ void  mtfp8_cast_transpose_general_kernel_column_unaligned(
     float amax_rowwise;
     float amax_columnwise[N_ELEMENTS_PER_THREAD_X] = {0.f};
 
-    input_vec_t tmp_load_reg;
     out_vec_t tmp_store_reg;
     scale_vec_t scale_store_reg;
 
@@ -256,20 +279,36 @@ __global__ void  mtfp8_cast_transpose_general_kernel_column_unaligned(
                            group_inner_y_id + ii_y:
                            0;
         *reinterpret_cast<input_vec_t*>(shm[group_inner_y_id + ii_y] + local_col_base_id) = *reinterpret_cast<const input_vec_t*>(inp_load_ptr + ld_st_offset * ncols);
-        tmp_load_reg.load_from(shm[group_inner_y_id + ii_y] + local_col_base_id, 0);
         
+        // ======================= OPTIMIZATION START ========================
+        // 优化二: 重组循环以提高指令级并行 (ILP)
+        float tmp_load_float[N_ELEMENTS_PER_THREAD_X];
+        const IType* shm_ptr = shm[group_inner_y_id + ii_y] + local_col_base_id;
+
+        // 循环 1: 从共享内存加载并转换为 float, 存入寄存器
         #pragma unroll
         for (int ii_x = 0; ii_x < N_ELEMENTS_PER_THREAD_X; ii_x++) {
-          amax_rowwise = fmaxf(fmaxf(amax_rowwise, fabsf(tmp_load_reg.data.elt[ii_x])), global_amax_min);
-          amax_columnwise[ii_x] = fmaxf(fmaxf(amax_columnwise[ii_x], fabsf(tmp_load_reg.data.elt[ii_x])), global_amax_min);
+            tmp_load_float[ii_x] = static_cast<float>(shm_ptr[ii_x]);
+        }
+        
+        // 循环 2: 在寄存器上进行 amax 计算
+        #pragma unroll
+        for (int ii_x = 0; ii_x < N_ELEMENTS_PER_THREAD_X; ii_x++) {
+          amax_rowwise = fmaxf(fmaxf(amax_rowwise, fabsf(tmp_load_float[ii_x])), global_amax_min);
+          amax_columnwise[ii_x] = fmaxf(fmaxf(amax_columnwise[ii_x], fabsf(tmp_load_float[ii_x])), global_amax_min);
         }
 
         amax_rowwise = warpReduceMax(amax_rowwise) * (float)(Quantized_Limits<OType>::max_norm_rcp);
 
+        // 优化一: 用乘法代替除法
+        const float rcp_amax_rowwise = (amax_rowwise > 0.f) ? (1.0f / amax_rowwise) : 0.f;
+
         //// write back to scale_inv and out_c [rowwise result]
         for (int ii_x = 0; ii_x < N_ELEMENTS_PER_THREAD_X; ii_x++) {
-            tmp_store_reg.data.elt[ii_x] = static_cast<OType>(float(tmp_load_reg.data.elt[ii_x]) / amax_rowwise);
+            tmp_store_reg.data.elt[ii_x] = static_cast<OType>(tmp_load_float[ii_x] * rcp_amax_rowwise);
         }
+        // ======================== OPTIMIZATION END =========================
+
         tmp_store_reg.store_to(out_c_store_ptr + ld_st_offset * ncols, 0);
         if (threadIdx.x == 0) {
           rowwise_scale_inv_ptr[ld_st_offset * rowwise_scale_inv_stride] = amax_rowwise;
@@ -296,10 +335,16 @@ __global__ void  mtfp8_cast_transpose_general_kernel_column_unaligned(
     }
 
     __syncthreads_lm();
+
+    // ======================= OPTIMIZATION START ========================
+    // 优化一: 用乘法代替除法 (Column-wise)
+    float rcp_amax_columnwise[N_ELEMENTS_PER_THREAD_X];
     #pragma unroll
     for (int ii = 0; ii < N_ELEMENTS_PER_THREAD_X; ii++) {
       amax_columnwise[ii] = (float)shm_amax_columnwise[0][local_col_base_id + ii] * (float)(Quantized_Limits<OType>::max_norm_rcp);
+      rcp_amax_columnwise[ii] = (amax_columnwise[ii] > 0.f) ? (1.0f / amax_columnwise[ii]) : 0.f;
     }
+    // ======================== OPTIMIZATION END =========================
 
     // write back to columnwise_scale_inv and out_t
     for (int loop_y_id = 0; loop_y_id < REPEAT_Y; loop_y_id++) {
@@ -311,7 +356,10 @@ __global__ void  mtfp8_cast_transpose_general_kernel_column_unaligned(
                             0;
         
         for (int ii_x = 0; ii_x < N_ELEMENTS_PER_THREAD_X; ii_x++) {
-          float value = (float)shm[group_inner_y_offset][local_col_base_id + ii_x] / amax_columnwise[ii_x];
+          // ======================= OPTIMIZATION START ========================
+          // 优化一: 用乘法代替除法 (Column-wise)
+          float value = static_cast<float>(shm[group_inner_y_offset][local_col_base_id + ii_x]) * rcp_amax_columnwise[ii_x];
+          // ======================== OPTIMIZATION END =========================
           tmp_store_reg.data.elt[ii_x] = static_cast<OType>(value);
         }
         tmp_store_reg.store_to(out_t_store_ptr + store_offset * ncols, 0);
