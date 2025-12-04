@@ -39,7 +39,7 @@ from .. import cpp_extensions as ceg
 from ..constants import GemmParallelModes, dist_group_type, TE_DType
 from ..jit import no_torch_dynamo
 from ..graph import is_graph_capturing
-from ..tensor.float8_tensor import Float8Tensor
+from ..tensor.float8_tensor import Float8Tensor, Float8Quantizer
 from ..cpu_offload import is_cpu_offload_enabled
 
 from ..tensor.quantized_tensor import (
@@ -78,9 +78,9 @@ class _GroupedLinear(torch.autograd.Function):
         is_grad_enabled: bool,
         module,
         skip_fp8_weight_update,
+        save_original_input,        
         *weights_and_biases,
     ) -> torch.Tensor:
-
         # pylint: disable=missing-function-docstring
         num_gemms = len(m_splits)
         weights = weights_and_biases[:num_gemms]
@@ -100,12 +100,22 @@ class _GroupedLinear(torch.autograd.Function):
 
         weight_requires_grad = weights[0].requires_grad
 
+        if save_original_input and isinstance(input_quantizers[0], Float8Quantizer):
+            raise ValueError("DelayedScaling recipe is not supported with save_original_input")
         if input_quantizers[0] is not None:
             for input_quantizer in input_quantizers:
                 input_quantizer.set_usage(
                     rowwise=True,
-                    columnwise=(is_grad_enabled and weight_requires_grad),
+                    columnwise=(
+                        is_grad_enabled and weight_requires_grad and not save_original_input
+                    ),
                 )
+                
+                # HACK:(Xiaoteng.Cui) To ensure casted output tensor's precision, MTFP8Quantizer needs both rowwise and columnwise usage set as a temporary workaround.
+                from ...musa.pytorch.tensor.mtfp8_tensor import MTFP8Quantizer
+                if isinstance(input_quantizer, MTFP8Quantizer):
+                    input_quantizer.set_usage(rowwise=True, columnwise=True)
+                
             columnwise_usage = is_grad_enabled and inp.requires_grad
             if not columnwise_usage:
                 columnwise_usage = (
@@ -179,11 +189,15 @@ class _GroupedLinear(torch.autograd.Function):
             ctx.weights_shape_1 = weights[0].shape[1]
 
             if weight_requires_grad:
-                for inputmat in inputmats:
-                    from ...musa.pytorch.tensor.mtfp8_tensor_base import MTFP8TensorBase
-                    if isinstance(inputmat, MTFP8TensorBase) and inputmat._rowwise_data.numel() != 0:
-                        inputmat._rowwise_data = None
-                        inputmat._rowwise_scale_inv = None
+                if save_original_input:
+                    inputmats = [None] * num_gemms
+                    inputmats[0] = inp
+                else:
+                    for inputmat in inputmats:
+                        from ...musa.pytorch.tensor.mtfp8_tensor_base import MTFP8TensorBase
+                        if isinstance(inputmat, MTFP8TensorBase) and inputmat._rowwise_data.numel() != 0:
+                            inputmat._rowwise_data = None
+                            inputmat._rowwise_scale_inv = None
             else:
                 inputmats = [None] * num_gemms
             
@@ -215,6 +229,9 @@ class _GroupedLinear(torch.autograd.Function):
                 ctx.reduce_and_update_bwd_fp8_tensors = FP8GlobalStateManager.is_first_fp8_module()
                 if in_fp8_activation_recompute_phase():
                     FP8GlobalStateManager.IS_FIRST_FP8_MODULE = _first_fp8_module
+            ctx.save_original_input = save_original_input
+            ctx.input_quantizers = input_quantizers
+            ctx.in_features = in_features            
 
         # [*, in_features] -> [*, out_features] except first dimension changes for SP
         return out.view(-1, *inp.shape[1:-1], out.shape[-1])
@@ -294,6 +311,26 @@ class _GroupedLinear(torch.autograd.Function):
                         torch.empty(w.size(), dtype=ctx.activation_dtype, device=ctx.device)
                         for w in weights
                     ]
+                    
+                if ctx.save_original_input:
+                    inp = inputmats[0]
+                    inputmats_no_fp8 = torch.split(inp.view(-1, ctx.in_features), ctx.m_splits)
+                    if ctx.input_quantizers[0] is not None:
+                        for input_quantizer in ctx.input_quantizers:
+                            if isinstance(input_quantizer, Float8Quantizer):
+                                input_quantizer.set_usage(rowwise=True, columnwise=True)
+                            else:
+                                input_quantizer.set_usage(rowwise=True, columnwise=True) 
+                                # HACK (Xiaoteng.Cui): In fact, rowwise should be False here, but MTFP8Quantizer will raise NVTECHECK error. 
+                                # MTFP8Quantizer needs both rowwise and columnwise usage set as a temporary workaround.
+                    inputmats: list
+                    if ctx.fp8:
+                        inputmats = tex.fused_multi_quantize(
+                            inputmats_no_fp8, None, ctx.input_quantizers, TE_DType[ctx.activation_dtype]
+                        )
+                    else:
+                        inputmats = [cast_if_needed(mat, ctx.activation_dtype) for mat in inputmats_no_fp8]
+                                            
                 # WGRAD
                 _, grad_biases_, _ = ceg.general_grouped_gemm(
                     inputmats,
@@ -371,6 +408,7 @@ class _GroupedLinear(torch.autograd.Function):
             None,
             None,  # is_grad_enabled
             None,  # is_grad_enabled
+            None,            
             *wgrad_list,
             *grad_biases,
         )
@@ -419,6 +457,11 @@ class GroupedLinear(TransformerEngineBaseModule):
                   it controls the type used to allocate the initial parameters. Useful when
                   the model is trained with lower precision and the original FP32 parameters
                   would not fit in GPU memory.
+    save_original_input : bool, default = `False`
+                    If set to `True`, always saves the original input tensor rather than the
+                    cast tensor. In some scenarios, the input tensor is used by multiple modules,
+                    and saving the original input tensor may reduce the memory usage.
+                    Cannot work with FP8 DelayedScaling recipe.
 
     """
 
@@ -442,6 +485,7 @@ class GroupedLinear(TransformerEngineBaseModule):
         ub_overlap_rs: bool = False,
         ub_overlap_ag: bool = False,
         ub_name: Optional[str] = None,
+        save_original_input: bool = False,        
     ) -> None:
         super().__init__()
 
@@ -456,6 +500,7 @@ class GroupedLinear(TransformerEngineBaseModule):
         self.ub_overlap_rs = ub_overlap_rs
         self.ub_overlap_ag = ub_overlap_ag
         self.ub_name = ub_name
+        self.save_original_input = save_original_input        
         assert (
             not ub_overlap_rs and not ub_overlap_ag
         ), "GroupedLinear doesn't support Userbuffer overlap."
@@ -655,6 +700,7 @@ class GroupedLinear(TransformerEngineBaseModule):
                 torch.is_grad_enabled(),
                 self,
                 skip_fp8_weight_update,
+                self.save_original_input,
                 *weight_tensors,
                 *bias_tensors,
             )

@@ -55,6 +55,8 @@ from ..tensor.quantized_tensor import (
     restore_from_saved,
 )
 
+from ..tensor.float8_tensor import Float8Quantizer
+
 from ..cpu_offload import is_cpu_offload_enabled, set_offloading_param
 
 __all__ = ["Linear"]
@@ -99,6 +101,7 @@ class _Linear(torch.autograd.Function):
         fsdp_group: Union[dist_group_type, None],
         module: torch.nn.Module,
         skip_fp8_weight_update: bool,
+        save_original_input: bool = False,
     ) -> torch.Tensor:
         # pylint: disable=missing-function-docstring
 
@@ -119,6 +122,11 @@ class _Linear(torch.autograd.Function):
         )
         own_quantized_input = False
         if fp8:
+            if save_original_input:
+                assert not isinstance(
+                    input_quantizer, Float8Quantizer
+                ), "DelayedScaling recipe is not supported with save_original_input"
+            
             if (
                 any([ub_overlap_ag_fprop, ub_overlap_rs_fprop])
                 and not FP8GlobalStateManager.get_fp8_recipe().delayed()
@@ -144,6 +152,12 @@ class _Linear(torch.autograd.Function):
                     rowwise=True,
                     columnwise=backward_needs_input,
                 )
+                
+                # HACK:(Xiaoteng.Cui) To ensure casted output tensor's precision, MTFP8Quantizer needs both rowwise and columnwise usage set as a temporary workaround.
+                from ...musa.pytorch.tensor.mtfp8_tensor import MTFP8Quantizer
+                if isinstance(input_quantizer, MTFP8Quantizer):
+                    input_quantizer.set_usage(rowwise=True, columnwise=True)
+                    
                 if not isinstance(inputmat, QuantizedTensor):
                     inputmat = input_quantizer(inputmat)
                     own_quantized_input = True
@@ -233,10 +247,17 @@ class _Linear(torch.autograd.Function):
         )
 
         if is_grad_enabled:
+            if save_original_input:
+                inputmat = inp
+                
             saved_inputmat = None
+            ctx.backward_input_needs_gather = (
+                weight.requires_grad and parallel_mode == "column" and sequence_parallel
+            )
             if backward_needs_input:
-                if own_quantized_input and isinstance(inputmat, QuantizedTensor):
-                    inputmat.update_usage(rowwise_usage=False)
+                if not save_original_input:
+                    if own_quantized_input and isinstance(inputmat, QuantizedTensor):
+                        inputmat.update_usage(rowwise_usage=False)
                 saved_inputmat = inputmat
 
             if cpu_offloading:
@@ -418,6 +439,25 @@ class _Linear(torch.autograd.Function):
             # Note: Perform tensor-parallel communication if needed
             inputmat_total = None
             inputmat_total_work = None
+            if ctx.requires_wgrad:
+                input_is_quantized = isinstance(inputmat, QuantizedTensor)
+                if ctx.fp8 or ctx.debug:
+                    if not input_is_quantized:
+                        quantizer = ctx.input_quantizer
+                        if isinstance(quantizer, Float8Quantizer):
+                            quantizer.set_usage(
+                                rowwise=True,
+                                columnwise=not ctx.backward_input_needs_gather,
+                            )
+                        else:
+                            quantizer.set_usage(rowwise=True, columnwise=True) 
+                            # HACK (Xiaoteng.Cui): In fact, rowwise should be False here, but MTFP8Quantizer will raise NVTECHECK error.
+                        inputmat = quantizer(inputmat)
+                else:
+                    if input_is_quantized:
+                        inputmat = inputmat.dequantize(dtype=ctx.activation_dtype)
+                    else:
+                        inputmat = cast_if_needed(inputmat, ctx.activation_dtype)
             if (
                 ctx.requires_wgrad
                 and ctx.parallel_mode == "column"
@@ -625,6 +665,7 @@ class _Linear(torch.autograd.Function):
             None,  # fsdp_group
             None,  # module
             None,  # skip_fp8_weight_update
+            None,  # save_original_input
         )
 
 
@@ -695,6 +736,11 @@ class Linear(TransformerEngineBaseModule):
                   it controls the type used to allocate the initial parameters. Useful when
                   the model is trained with lower precision and the original FP32 parameters
                   would not fit in GPU memory.
+    save_original_input : bool, default = `False`
+                    If set to `True`, always saves the original input tensor rather than the
+                    cast tensor. In some scenarios, the input tensor is used by multiple modules,
+                    and saving the original input tensor may reduce the memory usage.
+                    Cannot work with FP8 DelayedScaling recipe.
 
     """
 
@@ -721,6 +767,7 @@ class Linear(TransformerEngineBaseModule):
         ub_bulk_dgrad: bool = False,
         ub_bulk_wgrad: bool = False,
         ub_name: Optional[str] = None,
+        save_original_input: bool = False,
     ) -> None:
         super().__init__()
 
@@ -733,6 +780,7 @@ class Linear(TransformerEngineBaseModule):
         self.apply_bias = bias and not return_bias
         self.get_rng_state_tracker = get_rng_state_tracker
         self.rng_tracker_name = rng_tracker_name
+        self.save_original_input = save_original_input
 
         if device == "meta":
             assert parameters_split is None, "Cannot split module parameters on 'meta' device."
@@ -1046,6 +1094,7 @@ class Linear(TransformerEngineBaseModule):
                 self.fsdp_group,
                 self,
                 skip_fp8_weight_update,
+                self.save_original_input,
             )
             out = linear_fn(*args)
         if self.gemm_bias_unfused_add:
