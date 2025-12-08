@@ -82,6 +82,11 @@ class _GroupedLinear(torch.autograd.Function):
         *weights_and_biases,
     ) -> torch.Tensor:
         # pylint: disable=missing-function-docstring
+
+        # collect max token num on this device
+        from mem_utils import MemMonitor
+        MemMonitor.max_token_num = max(MemMonitor.max_token_num, inp.numel() // inp.shape[-1])
+        
         num_gemms = len(m_splits)
         weights = weights_and_biases[:num_gemms]
         biases = weights_and_biases[num_gemms:]
