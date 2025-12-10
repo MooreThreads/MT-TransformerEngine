@@ -441,7 +441,7 @@ class _Linear(torch.autograd.Function):
             inputmat_total_work = None
             if ctx.requires_wgrad:
                 input_is_quantized = isinstance(inputmat, QuantizedTensor)
-                if ctx.fp8 or ctx.debug:
+                if ctx.fp8:
                     if not input_is_quantized:
                         quantizer = ctx.input_quantizer
                         if isinstance(quantizer, Float8Quantizer):
