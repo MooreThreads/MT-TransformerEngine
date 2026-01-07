@@ -395,10 +395,19 @@ std::optional<std::vector<at::Tensor>> te_general_grouped_gemm(
     wrappers.emplace_back(std::move(wsp));
   }
   // For now, we only have multi-stream cublas backend.
-  nvte_multi_stream_cublas_gemm(te_A_vector.data(), te_B_vector.data(), te_D_vector.data(),
-                                te_bias_vector.data(), te_pre_gelu_out_vector.data(),
-                                te_A_vector.size(), transa, transb, grad,
-                                te_workspace_vector.data(), accumulate, use_split_accumulator,
-                                math_sm_count, at::musa::getCurrentMUSAStream());
+  if (std::getenv("TE_MULTI_STREAM_GROUPGEMM") != nullptr
+  && std::string(std::getenv("TE_MULTI_STREAM_GROUPGEMM")) == "1") {
+    nvte_multi_stream_cublas_gemm(te_A_vector.data(), te_B_vector.data(), te_D_vector.data(),
+                                  te_bias_vector.data(), te_pre_gelu_out_vector.data(),
+                                  te_A_vector.size(), transa, transb, grad,
+                                  te_workspace_vector.data(), accumulate, use_split_accumulator,
+                                  math_sm_count, at::musa::getCurrentMUSAStream());
+  } else {
+    nvte_grouped_mudnn_gemm(te_A_vector.data(), te_B_vector.data(), te_D_vector.data(),
+                                  te_bias_vector.data(), te_pre_gelu_out_vector.data(),
+                                  te_A_vector.size(), transa, transb, grad,
+                                  te_workspace_vector.data(), accumulate, use_split_accumulator,
+                                  math_sm_count, at::musa::getCurrentMUSAStream());
+  }
   return bias;
 }

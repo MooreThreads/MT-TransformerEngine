@@ -380,3 +380,128 @@ void nvte_multi_stream_cublas_gemm(
     }
   }
 }
+
+
+void nvte_grouped_mudnn_gemm(
+    const NVTETensor* A,
+    const NVTETensor* B,
+    NVTETensor* D,
+    const NVTETensor* bias,
+    NVTETensor* pre_gelu_out,
+    const int num_gemms,
+    bool transa,
+    bool transb,
+    bool grad,
+    NVTETensor* workspace,
+    bool accumulate,
+    bool use_split_accumulator,
+    int math_sm_count,
+    musaStream_t stream) {
+  NVTE_API_CALL(nvte_grouped_mudnn_gemm);
+  using namespace transformer_engine;
+
+  std::vector<at::musa::muTensor> inputL(num_gemms);
+  std::vector<at::musa::muTensor> inputR(num_gemms);
+  std::vector<at::musa::muTensor> inputBias(num_gemms);
+  std::vector<at::musa::muTensor> inputOut(num_gemms);
+  NVTE_CHECK(num_gemms >= 0, "The input of B mustn't be empty.");
+  std::vector<::musa::dnn::MatMulLtParam> lt_parap_vec(num_gemms);
+  const auto B_type = reinterpret_cast<const Tensor*>(B[0])->dtype();
+  bool with_bias = false;
+  for (int i = 0; i < num_gemms; i++) {
+    // trans NVTETensor to Tensor
+    const auto* inputA = reinterpret_cast<const Tensor*>(A[i]);
+    const auto* inputB = reinterpret_cast<const Tensor*>(B[i]);
+    auto* outputD = reinterpret_cast<Tensor*>(D[i]);
+    const auto* biasTensor = reinterpret_cast<const Tensor*>(bias[i]);
+    auto* geluOut = reinterpret_cast<Tensor*>(pre_gelu_out[i]);
+
+    NVTE_CHECK(outputD->has_data());
+    NVTE_CHECK(!geluOut->has_data(), "Gelu epilogue is not supported!");
+
+    const auto A_type = inputA->dtype();
+    const auto is_fp8_A = is_fp8_dtype(A_type);
+
+    const auto B_type = inputB->dtype();
+    const auto is_fp8_B = is_fp8_dtype(B_type);
+
+    NVTE_CHECK(
+      is_fp8_A == is_fp8_B,
+      "Inputs to muDNN GEMM must all be non-fp8 or fp8 dtypes!");
+
+    if (biasTensor->has_data() && !grad) {
+      NVTE_CHECK(
+          biasTensor->data.shape.size() == 1 &&
+              biasTensor->data.shape[0] == outputD->flat_last_dim(),
+          "Mismatch bias shape, expect ",
+          outputD->flat_last_dim(),
+          ", but got ",
+          biasTensor->data.shape[0]);
+    }
+    if (is_fp8_A) {
+      const bool has_bias_scale = (biasTensor->scale_inv.dptr != nullptr);
+
+      const bool has_output_scale = (outputD->scale.dptr != nullptr);
+      const bool has_output_amax = (outputD->amax.dptr != nullptr);
+
+      const auto info = get_gemm_info(inputA, transa, inputB, transb);
+      const auto& data_b = *(info.data_b);
+      const auto& sinv_b = *(info.sinv_b);
+      const auto& data_a = *(info.data_a);
+      const auto& sinv_a = *(info.sinv_a);
+      //set scales which will be used in mudnn kernel.
+      auto mu_scale_l = CreateMUTensor(sinv_b);
+      auto mu_scale_r = CreateMUTensor(sinv_a);
+      auto mu_scale_b = has_bias_scale
+          ? CreateMUTensor(biasTensor->scale_inv) : empty_mu_tensor;
+      auto mu_scale_o = has_output_scale
+          ? CreateMUTensor(outputD->scale): empty_mu_tensor;
+      auto mu_amax_o = has_output_amax
+          ? CreateMUTensor(outputD->amax): empty_mu_tensor;
+      
+      if (info.is_per_tensor) {
+        CHECK_MUDNN_STATUS(lt_parap_vec[i].SetScale(mu_scale_l, mu_scale_r, mu_scale_b, mu_scale_o), "SetScale");
+      } else {
+        NVTE_CHECK(inputB->scale_inv.shape.size() == 2);
+        const auto tile_size = static_cast<int>(next_power_of_2(inputB->flat_last_dim() / inputB->scale_inv.shape[1]));
+        CHECK_MUDNN_STATUS(lt_parap_vec[i].SetScale(mu_scale_l, mu_scale_r, mu_scale_b, mu_scale_o, tile_size), "SetScale");
+      }
+      CHECK_MUDNN_STATUS(lt_parap_vec[i].SetAmaxD(mu_amax_o), "SetAmax");
+      inputR[i] = CreateMUTensor(data_a, Flat2DimShape(inputA));
+      inputL[i] = CreateMUTensor(data_b, Flat2DimShape(inputB));
+    } else {
+      NVTE_CHECK(
+          A_type == B_type,
+          "Both inputs to muDNN non-FP8 GEMM must have the same dtype!");
+      inputR[i] = CreateMUTensor(*get_data(inputA, transa), Flat2DimShape(inputA));
+      inputL[i] = CreateMUTensor(*get_data(inputB, transb), Flat2DimShape(inputB));
+
+    }
+
+    // trans NVTETenso to MUTensor
+    const bool has_bias = biasTensor->has_data();
+    auto mu_b = has_bias ? CreateMUTensor(biasTensor->data) : empty_mu_tensor;
+    auto mu_o = CreateMUTensor(outputD->data, Flat2DimShape(outputD));
+    if (!has_bias) {
+      SetMUTensorDType(outputD->dtype(), mu_b);
+    }
+    with_bias = with_bias || has_bias;
+    inputBias[i] = mu_b;
+    inputOut[i] = mu_o;
+  }
+  const auto& bias_ptr = with_bias ? inputBias.data() : nullptr;
+  bool split_k = true;
+  auto& h = at::GetMudnnHandle();
+  h.SetStream(stream);
+  ::musa::dnn::GroupedMatMul op;
+  CHECK_MUDNN_STATUS(op.SetTranspose(transb, transa), "SetTranspose");
+  CHECK_MUDNN_STATUS(op.SetDeterministic(!split_k), "SetDeterministic");
+  CHECK_MUDNN_STATUS(
+      op.SetComputeMode(GetComputeModeFromCtx(ToTorchDtype(B_type))),
+      "SetComputeMode");
+  CHECK_MUDNN_STATUS(op.SetBeta(accumulate ? 1.0 : 0.0), "SetBeta");
+
+  CHECK_MUDNN_STATUS(op.RunLt(h, inputOut.data(), inputL.data(), inputR.data(), inputOut.data(), bias_ptr,
+             lt_parap_vec.data(), num_gemms, InternalMemAlloc), "RunLt");
+
+}
