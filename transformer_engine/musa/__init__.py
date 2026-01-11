@@ -174,8 +174,8 @@ def patch_after_import_torch():
 
     import os
     #HACK(sherry): enable torch.compile
-    os.environ["NVTE_TORCH_COMPILE"] = "1"
-    os.environ["TORCHDYNAMO_DISABLE"] = "0"
+    os.environ["NVTE_TORCH_COMPILE"] = "0"
+    os.environ["TORCHDYNAMO_DISABLE"] = "1"
     #HACK(sherry)
 
 def py_patch():

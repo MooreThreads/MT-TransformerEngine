@@ -358,6 +358,21 @@ class _GroupedLinear(torch.autograd.Function):
 
                 if os.getenv("ENABLE_ZERO_BUBBLE", "0") == "0":
                     # Deallocate input tensor
+                    from ...musa.pytorch.tensor.mtfp8_tensor import MTFP8Quantizer, MTFP8TensorBase
+                    for inp in inputmats:
+                        if inp is not None:
+                            if isinstance(inp, MTFP8TensorBase):
+                                if inp._rowwise_data is not None:
+                                    inp._rowwise_data.data = torch.Tensor()
+                                if inp._rowwise_scale_inv is not None:
+                                    inp._rowwise_scale_inv.data = torch.Tensor()
+                                if inp._columnwise_data is not None:
+                                    inp._columnwise_data.data = torch.Tensor()
+                                if inp._columnwise_scale_inv is not None:
+                                    inp._columnwise_scale_inv.data = torch.Tensor()
+                            else:
+                                inp.data = torch.Tensor()
+
                     clear_tensor_data(*inputmats)
 
                 def handle_custom_ddp_from_mcore(w, wgrad):

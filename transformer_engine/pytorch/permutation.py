@@ -4,7 +4,7 @@
 
 """MoE Permutaion API"""
 import warnings
-from typing import Tuple
+from typing import Tuple, Callable
 import torch
 
 import transformer_engine_torch as tex
@@ -262,6 +262,10 @@ class _moe_permute_mask_map(torch.autograd.Function):
         routing_map: torch.Tensor,
         num_out_tokens: int,
         probs: torch.Tensor,
+        preallocated_act_f: torch.Tensor = None,
+        preallocated_probs_f: torch.Tensor = None,
+        preallocated_act_b: torch.Tensor = None,
+        preallocated_probs_b: torch.Tensor = None,
     ) -> Tuple[torch.Tensor, torch.Tensor]:
         # pylint: disable=missing-function-docstring
         if not inp.numel():
@@ -293,6 +297,18 @@ class _moe_permute_mask_map(torch.autograd.Function):
             dtype = TE_DType[inp.dtype]
             if probs is None:
                 probs = torch.empty(0)
+            if preallocated_act_f is None:
+                preallocated_act_f = torch.empty(0)
+            else:
+                preallocated_act_f = preallocated_act_f.view(inp.dtype)
+                preallocated_act_f = preallocated_act_f[:num_out_tokens*hidden_size]
+                preallocated_act_f = preallocated_act_f.view(num_out_tokens, hidden_size)
+            if preallocated_probs_f is None:
+                preallocated_probs_f = torch.empty(0)
+            else:
+                preallocated_probs_f = preallocated_probs_f.view(probs.dtype)
+                preallocated_probs_f = preallocated_probs_f[:num_out_tokens]
+                preallocated_probs_f = preallocated_probs_f.view(num_out_tokens)
             output, permuted_probs = tex.moe_permute_mask(
                 dtype,
                 inp,
@@ -302,6 +318,8 @@ class _moe_permute_mask_map(torch.autograd.Function):
                 num_experts,
                 num_out_tokens,
                 hidden_size,
+                preallocated_act_f,
+                preallocated_probs_f,
             )
         else:
             output, permuted_probs = triton_permutation.permute_with_mask_map(
@@ -312,6 +330,8 @@ class _moe_permute_mask_map(torch.autograd.Function):
                 num_experts,
                 num_out_tokens,
                 hidden_size,
+                preallocated_act_f,
+                preallocated_probs_f,
             )
         if fp8:
             output = Float8Tensor(
@@ -326,6 +346,8 @@ class _moe_permute_mask_map(torch.autograd.Function):
         ctx.num_experts = num_experts
         ctx.num_tokens = num_tokens
         ctx.hidden_size = hidden_size
+        ctx.preallocated_act_b = preallocated_act_b
+        ctx.preallocated_probs_b = preallocated_probs_b
         return output, row_id_map, permuted_probs
 
     @staticmethod
@@ -337,7 +359,10 @@ class _moe_permute_mask_map(torch.autograd.Function):
     ) -> Tuple[torch.Tensor, ...]:
         # pylint: disable=missing-function-docstring
         if not permuted_act_grad.numel():
-            return permuted_act_grad, None, None, ctx.probs
+            return permuted_act_grad, None, None, ctx.probs, None, None, None, None
+        
+        preallocated_act_b = ctx.preallocated_act_b
+        preallocated_probs_b = ctx.preallocated_probs_b
 
         act_grad = None
         probs_grad = None
@@ -356,6 +381,18 @@ class _moe_permute_mask_map(torch.autograd.Function):
                 dtype = TE_DType[permuted_act_grad.dtype]
                 if permuted_probs_grad is None:
                     permuted_probs_grad = torch.empty(0)
+                if preallocated_act_b is None:
+                    preallocated_act_b = torch.empty(0)
+                else:
+                    preallocated_act_b = preallocated_act_b.view(permuted_act_grad.dtype)
+                    preallocated_act_b = preallocated_act_b[:ctx.num_tokens*ctx.hidden_size]
+                    preallocated_act_b = preallocated_act_b.view(ctx.num_tokens, ctx.hidden_size)
+                if preallocated_probs_b is None:
+                    preallocated_probs_b = torch.empty(0)
+                else:
+                    preallocated_probs_b = preallocated_probs_b.view(permuted_probs_grad.dtype)
+                    preallocated_probs_b = preallocated_probs_b[:ctx.num_tokens*ctx.num_experts]
+                    preallocated_probs_b = preallocated_probs_b.view(ctx.num_tokens, ctx.num_experts)
                 act_grad, probs_grad = tex.moe_unpermute_mask(
                     dtype,
                     permuted_act_grad,
@@ -365,6 +402,8 @@ class _moe_permute_mask_map(torch.autograd.Function):
                     ctx.num_tokens,
                     ctx.num_experts,
                     ctx.hidden_size,
+                    preallocated_act_b,
+                    preallocated_probs_b,
                 )
             else:
                 act_grad, probs_grad = triton_permutation.unpermute_with_mask_map(
@@ -376,6 +415,8 @@ class _moe_permute_mask_map(torch.autograd.Function):
                     ctx.num_experts,
                     ctx.hidden_size,
                     fp8_dtype,
+                    preallocated_act_b,
+                    preallocated_probs_b,
                 )
             if fp8:
                 act_grad = Float8Tensor(
@@ -387,7 +428,7 @@ class _moe_permute_mask_map(torch.autograd.Function):
                 )
         if not ctx.needs_input_grad[3]:
             probs_grad = None
-        return act_grad, None, None, probs_grad
+        return act_grad, None, None, probs_grad, None, None, None, None
 
 
 class _moe_unpermute_mask_map(torch.autograd.Function):
@@ -400,11 +441,18 @@ class _moe_unpermute_mask_map(torch.autograd.Function):
         row_id_map: torch.Tensor,
         merging_probs: torch.Tensor,
         restore_shape: torch.Size,
+        preallocated_act_f: torch.Tensor = None,
+        preallocated_probs_f: torch.Tensor = None,
+        preallocated_act_b: torch.Tensor = None,
+        preallocated_probs_b: torch.Tensor = None,
     ) -> torch.Tensor:
         # pylint: disable=missing-function-docstring
         if not inp.numel():
             ctx.merging_probs = merging_probs
             return inp
+
+        ctx.preallocated_act_b = preallocated_act_b
+        ctx.preallocated_probs_b = preallocated_probs_b
 
         if restore_shape is None:
             restore_shape = inp.shape
@@ -432,15 +480,25 @@ class _moe_unpermute_mask_map(torch.autograd.Function):
             fp8_dtype = None
         if not fp8 and num_experts % 4 == 0:
             dtype = TE_DType[inp.dtype]
+            if preallocated_act_f is None:
+                preallocated_act_f = torch.empty(0)
+            else:
+                preallocated_act_f = preallocated_act_f.view(inp.dtype)
+                preallocated_act_f = preallocated_act_f[:num_tokens*hidden_size]
+                preallocated_act_f = preallocated_act_f.view(num_tokens, hidden_size)
+            if preallocated_probs_f is None:
+                preallocated_probs_f = torch.empty(0)
             unpermuted_output, _ = tex.moe_unpermute_mask(
                 dtype,
                 inp,
                 row_id_map,
-                merging_probs,
+                merging_probs if merging_probs is not None else torch.empty(0),
                 torch.empty(0),
                 num_tokens,
                 num_experts,
                 hidden_size,
+                preallocated_act_f,
+                preallocated_probs_f,
             )
         else:
             unpermuted_output, _ = triton_permutation.unpermute_with_mask_map(
@@ -451,7 +509,9 @@ class _moe_unpermute_mask_map(torch.autograd.Function):
                 num_tokens,
                 num_experts,
                 hidden_size,
-                fp8_dtype=fp8_dtype,
+                fp8_dtype,
+                preallocated_act_f,
+                preallocated_probs_f,
             )
         if fp8:
             unpermuted_output = Float8Tensor(
@@ -477,7 +537,11 @@ class _moe_unpermute_mask_map(torch.autograd.Function):
     def backward(ctx, unpermuted_act_grad):
         # pylint: disable=missing-function-docstring
         if not unpermuted_act_grad.numel():
-            return unpermuted_act_grad, None, ctx.merging_probs, None
+            return unpermuted_act_grad, None, ctx.merging_probs, None, None, None, None, None
+        
+        preallocated_act_b = ctx.preallocated_act_b
+        preallocated_probs_b = ctx.preallocated_probs_b
+        assert preallocated_probs_b is None, 'preallocated_probs_b is not support for now'
 
         act_grad = None
         probs_grad = None
@@ -527,8 +591,14 @@ class _moe_unpermute_mask_map(torch.autograd.Function):
                         )
                     )
             else:
-                if not fp8 and num_experts % 4 == 0:
-                    dtype = TE_DType[inp.dtype]
+                if not fp8 and ctx.num_experts % 4 == 0:
+                    dtype = TE_DType[unpermuted_act_grad.dtype]
+                    if preallocated_act_b is None:
+                        preallocated_act_b = torch.empty(0)
+                    else:
+                        preallocated_act_b = preallocated_act_b.view(unpermuted_act_grad.dtype)
+                        preallocated_act_b = preallocated_act_b[:ctx.num_permuted_tokens*ctx.hidden_size]
+                        preallocated_act_b = preallocated_act_b.view(ctx.num_permuted_tokens, ctx.hidden_size)
                     act_grad, _ = tex.moe_permute_mask(
                         dtype,
                         unpermuted_act_grad,
@@ -538,6 +608,8 @@ class _moe_unpermute_mask_map(torch.autograd.Function):
                         ctx.num_experts,
                         ctx.num_permuted_tokens,
                         ctx.hidden_size,
+                        preallocated_act_b,
+                        torch.empty(0),
                     )
                 else:
                     act_grad, _ = triton_permutation.permute_with_mask_map(
@@ -548,6 +620,8 @@ class _moe_unpermute_mask_map(torch.autograd.Function):
                         ctx.num_experts,
                         ctx.num_permuted_tokens,
                         ctx.hidden_size,
+                        preallocated_act_b,
+                        None,
                     )
 
             if fp8:
@@ -561,7 +635,7 @@ class _moe_unpermute_mask_map(torch.autograd.Function):
 
         if not ctx.needs_input_grad[2]:
             probs_grad = None
-        return act_grad, None, probs_grad, None
+        return act_grad, None, probs_grad, None, None, None, None, None
 
 
 def moe_permute(
@@ -611,6 +685,10 @@ def moe_permute_with_probs(
     probs: torch.Tensor,
     routing_map: torch.Tensor,
     num_out_tokens: int = -1,
+    preallocated_act_f: torch.Tensor = None,
+    preallocated_probs_f: torch.Tensor = None,
+    preallocated_act_b: torch.Tensor = None,
+    preallocated_probs_b: torch.Tensor = None,
 ) -> Tuple[torch.Tensor, torch.Tensor]:
     """
     Permute the tokens and probs based on the routing_map.
@@ -634,7 +712,8 @@ def moe_permute_with_probs(
         By default, set to '-1', meaning no tokens are dropped.
     """
     output, row_id_map, permuted_probs = _moe_permute_mask_map.apply(
-        inp, routing_map, num_out_tokens, probs
+        inp, routing_map, num_out_tokens, probs, preallocated_act_f, preallocated_probs_f, preallocated_act_b,
+        preallocated_probs_b
     )
     return output, permuted_probs, row_id_map
 
@@ -646,6 +725,10 @@ def moe_unpermute(
     restore_shape: torch.Tensor = None,
     map_type: str = "mask",
     probs: torch.Tensor = None,
+    preallocated_act_f: torch.Tensor = None,
+    preallocated_probs_f: torch.Tensor = None,
+    preallocated_act_b: torch.Tensor = None,
+    preallocated_probs_b: torch.Tensor = None,
 ) -> torch.Tensor:
     """
     Unpermute a tensor with permuted tokens, and optionally merge the tokens with their
@@ -680,7 +763,8 @@ def moe_unpermute(
     if map_type == "index":
         return _moe_unpermute_index_map.apply(inp, row_id_map, merging_probs)
     if map_type == "mask":
-        return _moe_unpermute_mask_map.apply(inp, row_id_map, merging_probs, restore_shape)
+        return _moe_unpermute_mask_map.apply(inp, row_id_map, merging_probs, restore_shape, 
+            preallocated_act_f, preallocated_probs_f, preallocated_act_b, preallocated_probs_b)
     raise ValueError("map_type should be one of 'mask' or 'index'")
 
 
@@ -694,6 +778,10 @@ class _moe_chunk_sort(torch.autograd.Function):
         split_sizes: torch.Tensor,
         sorted_idxs: torch.Tensor,
         probs: torch.Tensor,
+        preallocated_act_f: torch.Tensor = None,
+        preallocated_probs_f: torch.Tensor = None,
+        preallocated_act_b: torch.Tensor = None,
+        preallocated_probs_b: torch.Tensor = None,
     ) -> Tuple[torch.Tensor, torch.Tensor]:
         # pylint: disable=missing-function-docstring
         if not inp.numel():
@@ -723,6 +811,8 @@ class _moe_chunk_sort(torch.autograd.Function):
             num_tokens,
             hidden_size,
             num_splits,
+            preallocated_act_f,
+            preallocated_probs_f,
         )
         if fp8:
             output = Float8Tensor(
@@ -736,6 +826,9 @@ class _moe_chunk_sort(torch.autograd.Function):
         ctx.save_for_backward(row_id_map)
         ctx.num_tokens = num_tokens
         ctx.hidden_size = hidden_size
+        ctx.preallocated_act_b = preallocated_act_b
+        ctx.preallocated_probs_b = preallocated_probs_b
+
         return output, permuted_probs
 
     @staticmethod
@@ -746,7 +839,10 @@ class _moe_chunk_sort(torch.autograd.Function):
     ) -> Tuple[torch.Tensor, ...]:
         # pylint: disable=missing-function-docstring
         if not permuted_act_grad.numel():
-            return permuted_act_grad, None, None, permuted_probs_grad
+            return permuted_act_grad, None, None, permuted_probs_grad, None, None, None, None, None, None
+        
+        preallocated_act_b = ctx.preallocated_act_b
+        preallocated_probs_b = ctx.preallocated_probs_b
 
         act_grad = None
         probs_grad = None
@@ -764,6 +860,8 @@ class _moe_chunk_sort(torch.autograd.Function):
                 permuted_probs_grad,
                 ctx.num_tokens,
                 ctx.hidden_size,
+                preallocated_act_b,
+                preallocated_probs_b,
             )
             if fp8:
                 act_grad = Float8Tensor(
@@ -775,13 +873,15 @@ class _moe_chunk_sort(torch.autograd.Function):
                 )
         if not ctx.needs_input_grad[3]:
             probs_grad = None
-        return act_grad, None, None, probs_grad
+        return act_grad, None, None, probs_grad, None, None, None, None, None, None
 
 
 def moe_sort_chunks_by_index(
     inp: torch.Tensor,
     split_sizes: torch.Tensor,
     sorted_index: torch.Tensor,
+    preallocated_act_f: torch.Tensor = None,
+    preallocated_act_b: torch.Tensor = None,
 ) -> Tuple[torch.Tensor, torch.Tensor]:
     """
     Split and sort the input tensor based on the split_sizes and sorted indices.
@@ -797,7 +897,7 @@ def moe_sort_chunks_by_index(
     sorted_indices: torch.Tensor
         Chunk indices used to permute the chunks.
     """
-    output, _ = _moe_chunk_sort.apply(inp, split_sizes, sorted_index, None)
+    output, _ = _moe_chunk_sort.apply(inp, split_sizes, sorted_index, None, preallocated_act_f, None, preallocated_act_b, None)
     return output
 
 
@@ -806,6 +906,10 @@ def moe_sort_chunks_by_index_with_probs(
     probs: torch.Tensor,
     split_sizes: torch.Tensor,
     sorted_index: torch.Tensor,
+    preallocated_act_f: torch.Tensor = None,
+    preallocated_probs_f: torch.Tensor = None,
+    preallocated_act_b: torch.Tensor = None,
+    preallocated_probs_b: torch.Tensor = None,
 ) -> Tuple[torch.Tensor, torch.Tensor]:
     """
     Split and sort the input tensor and probs based on the split_sizes and sorted indices.
@@ -825,5 +929,6 @@ def moe_sort_chunks_by_index_with_probs(
     sorted_indices: torch.Tensor
         Chunk indices used to permute the chunks.
     """
-    output, permuted_probs = _moe_chunk_sort.apply(inp, split_sizes, sorted_index, probs)
+    output, permuted_probs = _moe_chunk_sort.apply(inp, split_sizes, sorted_index, probs, 
+        preallocated_act_f, preallocated_probs_f, preallocated_act_b, preallocated_probs_b)
     return output, permuted_probs

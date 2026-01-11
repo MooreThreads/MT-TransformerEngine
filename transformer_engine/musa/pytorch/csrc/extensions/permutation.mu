@@ -177,16 +177,22 @@ std::tuple<at::Tensor, at::Tensor> moe_permute_mask(const transformer_engine::DT
                                                     at::Tensor input, at::Tensor row_id_map,
                                                     at::Tensor probs, int num_tokens,
                                                     int num_experts, int num_out_tokens,
-                                                    int hidden_size) {
+                                                    int hidden_size, at::Tensor preallocated_act,
+                                                    at::Tensor preallocated_probs) {
   using namespace transformer_engine::pytorch;
   const transformer_engine::DType probs_dtype = GetTransformerEngineDType(probs.scalar_type());
 
-  at::Tensor output =
-      torch::empty({num_out_tokens, hidden_size},
-                   torch::dtype(input.dtype()).device(torch::kPrivateUse1).requires_grad(false));
-  at::Tensor permuted_probs =
-      torch::empty({num_out_tokens},
-                   torch::dtype(probs.dtype()).device(torch::kPrivateUse1).requires_grad(false));
+  at::Tensor output = preallocated_act;
+  if (output.data_ptr() == nullptr) {
+    output = torch::empty({num_out_tokens, hidden_size},
+        torch::dtype(input.dtype()).device(torch::kPrivateUse1).requires_grad(false));
+  }
+
+  at::Tensor permuted_probs = preallocated_probs;
+  if (permuted_probs.data_ptr() == nullptr) {
+    permuted_probs = torch::empty({num_out_tokens},
+        torch::dtype(probs.dtype()).device(torch::kPrivateUse1).requires_grad(false));
+  }
 
   auto stream = at::musa::getCurrentMUSAStream().stream();
 
@@ -221,17 +227,24 @@ std::tuple<at::Tensor, at::Tensor> moe_unpermute_mask(const transformer_engine::
                                                       at::Tensor input, at::Tensor row_id_map,
                                                       at::Tensor merging_probs,
                                                       at::Tensor permuted_probs, int num_tokens,
-                                                      int num_experts, int hidden_size) {
+                                                      int num_experts, int hidden_size, 
+                                                      at::Tensor preallocated_act,
+                                                      at::Tensor preallocated_probs) {
   using namespace transformer_engine::pytorch;
   const transformer_engine::DType probs_dtype = GetTransformerEngineDType(permuted_probs.scalar_type());
 
-  at::Tensor output =
-      torch::empty({num_tokens, hidden_size},
-                   torch::dtype(input.dtype()).device(torch::kPrivateUse1).requires_grad(false));
-  at::Tensor unpermuted_probs =
-      torch::empty({num_tokens, num_experts},
-                   torch::dtype(permuted_probs.dtype()).device(torch::kPrivateUse1).requires_grad(false));
+  at::Tensor output = preallocated_act;
+  if (output.data_ptr() == nullptr) {
+    output = torch::empty({num_tokens, hidden_size},
+        torch::dtype(input.dtype()).device(torch::kPrivateUse1).requires_grad(false));
+  }
 
+  at::Tensor unpermuted_probs = preallocated_probs;
+  if (unpermuted_probs.data_ptr() == nullptr) {
+    unpermuted_probs = torch::empty({num_tokens, num_experts},
+        torch::dtype(permuted_probs.dtype()).device(torch::kPrivateUse1).requires_grad(false));
+
+  }
   auto stream = at::musa::getCurrentMUSAStream().stream();
 
   auto input_cu = makeTransformerEngineTensor(

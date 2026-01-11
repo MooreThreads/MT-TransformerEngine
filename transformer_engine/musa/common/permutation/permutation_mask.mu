@@ -340,7 +340,8 @@ void nvte_permute_mask_launcher(const Dtype *input, Dtype *output, IdxDtype *row
   const uint64_t map_globalStrides[4] = {0, 0, 0, 0};
   MUtensorDescriptorInterleave interleave = MU_TENSOR_DESCRIPTOR_INTERLEAVE_NONE;
   uint64_t oobConstantFill = 0;
-
+  
+  transformer_engine::checkCuDriverContext(stream);
   NVTE_CHECK_MU(muTensorDescriptorEncode(&intensorDesc, tensorDataType, tensorRank, (void *)input,
                                          in_globalDim, in_globalStrides, interleave,
                                          oobConstantFill));

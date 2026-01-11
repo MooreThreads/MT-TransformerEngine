@@ -35,13 +35,16 @@ std::tuple<at::Tensor, at::Tensor> moe_permute_mask(const transformer_engine::DT
                                                     at::Tensor input, at::Tensor row_id_map,
                                                     at::Tensor probs, int num_tokens,
                                                     int num_experts, int num_out_tokens,
-                                                    int hidden_size);
+                                                    int hidden_size, at::Tensor preallocated_act,
+                                                    at::Tensor preallocated_probs);
 
 std::tuple<at::Tensor, at::Tensor> moe_unpermute_mask(const transformer_engine::DType dtype,
                                                       at::Tensor input, at::Tensor row_id_map,
                                                       at::Tensor merging_probs,
                                                       at::Tensor permuted_probs, int num_tokens,
-                                                      int num_experts, int hidden_size);
+                                                      int num_experts, int hidden_size,
+                                                      at::Tensor preallocated_act,
+                                                      at::Tensor preallocated_probs);
 
 std::tuple<at::Tensor, at::Tensor> moe_unpermute_mask_bwd_with_merging_probs(
     const transformer_engine::DType dtype, at::Tensor fwd_output_grad, at::Tensor fwd_input,

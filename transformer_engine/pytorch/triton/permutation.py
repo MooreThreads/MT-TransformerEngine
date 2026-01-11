@@ -187,11 +187,23 @@ def permute_with_mask_map(
     num_experts: int,
     num_out_tokens: int,
     hidden_size: int,
+    preallocated_out: torch.Tensor = None,
+    preallocated_probs: torch.Tensor = None,
 ):
     # pylint: disable=missing-function-docstring
-    output = torch.empty((num_out_tokens, hidden_size), dtype=inp.dtype, device="cuda")
+    if preallocated_out is None:
+        output = torch.empty((num_out_tokens, hidden_size), dtype=inp.dtype, device="cuda")
+    else:
+        preallocated_out = preallocated_out.view(inp.dtype)
+        preallocated_out = preallocated_out[:num_out_tokens * hidden_size]
+        output = preallocated_out.view((num_out_tokens, hidden_size))
     if probs is not None:
-        permuted_probs = torch.empty((num_out_tokens,), dtype=probs.dtype, device="cuda")
+        if preallocated_probs is None:
+            permuted_probs = torch.empty((num_out_tokens,), dtype=probs.dtype, device="cuda")
+        else:
+            preallocated_probs = preallocated_probs.view(probs.dtype)
+            preallocated_probs = preallocated_probs[:num_out_tokens]
+            permuted_probs = preallocated_probs.view((num_out_tokens,))
     else:
         permuted_probs = None
     grid = (num_tokens,)
@@ -326,6 +338,8 @@ def unpermute_with_mask_map(
     num_experts: int,
     hidden_size: int,
     fp8_dtype: TE_DType,
+    preallocated_out: torch.Tensor = None,
+    preallocated_probs: torch.Tensor = None,
 ):
     # pylint: disable=missing-function-docstring
     if fp8_dtype == TE_DType.kFloat8E5M2:
@@ -334,11 +348,23 @@ def unpermute_with_mask_map(
         fp8_dtype = "e4m3"
     else:
         fp8_dtype = None
-    output = torch.empty((num_tokens, hidden_size), dtype=inp.dtype, device="cuda")
+
+    if preallocated_out is None:
+        output = torch.empty((num_tokens, hidden_size), dtype=inp.dtype, device="cuda")
+    else:
+        preallocated_out = preallocated_out.view(inp.dtype)
+        preallocated_out = preallocated_out[:num_tokens * hidden_size]
+        output = preallocated_out.view((num_tokens, hidden_size))
+
     if permuted_probs is not None:
-        unpermuted_probs = torch.empty(
-            (num_tokens, num_experts), dtype=permuted_probs.dtype, device="cuda"
-        )
+        if preallocated_probs is None:
+            unpermuted_probs = torch.empty(
+                (num_tokens, num_experts), dtype=permuted_probs.dtype, device="cuda"
+            )
+        else:
+            preallocated_probs = preallocated_probs.view(permuted_probs.dtype)
+            preallocated_probs = preallocated_probs[:num_tokens * num_experts]
+            unpermuted_probs = preallocated_probs.view((num_tokens, num_experts))
     else:
         unpermuted_probs = None
     grid = (num_tokens,)
@@ -485,6 +511,8 @@ def unpermute_with_mask_map_bwd_with_merging_probs(
     num_out_tokens: int,
     hidden_size: int,
     fp8_dtype: TE_DType,
+    preallocated_out: torch.Tensor = None,
+    preallocated_probs: torch.Tensor = None,
 ):
     # pylint: disable=missing-function-docstring
     if fp8_dtype == TE_DType.kFloat8E5M2:
@@ -493,12 +521,24 @@ def unpermute_with_mask_map_bwd_with_merging_probs(
         fp8_dtype = "e4m3"
     else:
         fp8_dtype = None
-    act_grad = torch.empty(
-        (num_out_tokens, hidden_size), dtype=fwd_output_grad.dtype, device="cuda"
-    )
-    merging_probs_grad = torch.empty(
-        (num_tokens, num_experts), dtype=merging_probs.dtype, device="cuda"
-    )
+    if preallocated_out is None:
+        act_grad = torch.empty(
+            (num_out_tokens, hidden_size), dtype=fwd_output_grad.dtype, device="cuda"
+        )
+    else:
+        preallocated_out = preallocated_out.view(fwd_output_grad.dtype)
+        preallocated_out = preallocated_out[:num_out_tokens * hidden_size]
+        act_grad = preallocated_out.view((num_out_tokens, hidden_size))
+
+    if preallocated_probs is None:
+        merging_probs_grad = torch.empty(
+            (num_tokens, num_experts), dtype=merging_probs.dtype, device="cuda"
+        )
+    else:
+        preallocated_probs = preallocated_probs.view(merging_probs.dtype)
+        preallocated_probs = preallocated_probs[:num_tokens * num_experts]
+        merging_probs_grad = preallocated_probs.view((num_tokens, num_experts))
+
     grid = (num_tokens,)
     _unpermute_bwd_with_merging_probs_kernel[grid](
         fwd_output_grad,
@@ -627,12 +667,24 @@ def sort_chunks_by_idx(
     num_tokens: int,
     hidden_size: int,
     num_splits: int,
+    preallocated_out: torch.Tensor = None,
+    preallocated_probs: torch.Tensor = None,
 ):
     # pylint: disable=missing-function-docstring
     row_id_map = torch.empty((num_tokens,), dtype=torch.int64, device="cuda")
-    output = torch.empty((num_tokens, hidden_size), dtype=inp.dtype, device="cuda")
+    if preallocated_out is None:
+        output = torch.empty((num_tokens, hidden_size), dtype=inp.dtype, device="cuda")
+    else:
+        preallocated_out = preallocated_out.view(inp.dtype)
+        preallocated_out = preallocated_out[:num_tokens * hidden_size]
+        output = preallocated_out.view((num_tokens, hidden_size))
     if probs is not None:
-        permuted_probs = torch.empty((num_tokens,), dtype=probs.dtype, device="cuda")
+        if preallocated_probs is None:
+            permuted_probs = torch.empty((num_tokens,), dtype=probs.dtype, device="cuda")
+        else:
+            preallocated_probs = preallocated_probs.view(probs.dtype)
+            preallocated_probs = preallocated_probs[:num_tokens]
+            permuted_probs = preallocated_probs.view((num_tokens,))
     else:
         permuted_probs = None
     grid = (num_tokens,)
@@ -718,11 +770,23 @@ def sort_chunks_by_map(
     probs: torch.Tensor,
     num_tokens: int,
     hidden_size: int,
+    preallocated_out: torch.Tensor = None,
+    preallocated_probs: torch.Tensor = None,
 ):
     # pylint: disable=missing-function-docstring
-    output = torch.empty((num_tokens, hidden_size), dtype=inp.dtype, device="cuda")
+    if preallocated_out is None:
+        output = torch.empty((num_tokens, hidden_size), dtype=inp.dtype, device="cuda")
+    else:
+        preallocated_out = preallocated_out.view(inp.dtype)
+        preallocated_out = preallocated_out[:num_tokens * hidden_size]
+        output = preallocated_out.view((num_tokens, hidden_size))
     if probs is not None:
-        permuted_probs = torch.empty((num_tokens,), dtype=probs.dtype, device="cuda")
+        if preallocated_probs is None:
+            permuted_probs = torch.empty((num_tokens,), dtype=probs.dtype, device="cuda")
+        else:
+            preallocated_probs = preallocated_probs.view(probs.dtype)
+            preallocated_probs = preallocated_probs[:num_tokens]
+            permuted_probs = preallocated_probs.view((num_tokens,))
     else:
         permuted_probs = None
     grid = (num_tokens,)
