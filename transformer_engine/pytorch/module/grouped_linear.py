@@ -39,7 +39,7 @@ from .. import cpp_extensions as ceg
 from ..constants import GemmParallelModes, dist_group_type, TE_DType
 from ..jit import no_torch_dynamo
 from ..graph import is_graph_capturing
-from ..tensor.float8_tensor import Float8Tensor, Float8Quantizer
+from ..tensor.float8_tensor import Float8Tensor, Float8Quantizer, Float8TensorBase, QuantizedTensor
 from ..cpu_offload import is_cpu_offload_enabled
 
 from ..tensor.quantized_tensor import (
@@ -49,6 +49,7 @@ from ..tensor.quantized_tensor import (
     restore_from_saved,
 )
 
+from transformer_engine.pytorch.cpu_offload import set_offloading_param, get_fine_grained_offload_handler
 
 __all__ = ["GroupedLinear"]
 
@@ -73,12 +74,13 @@ class _GroupedLinear(torch.autograd.Function):
         grad_output_quantizers: List[Quantizer],
         fuse_wgrad_accumulation: bool,
         cpu_offloading: bool,
+        fine_grained_offload: bool,
         sequence_parallel: bool,
         activation_dtype: torch.dtype,
         is_grad_enabled: bool,
         module,
         skip_fp8_weight_update,
-        save_original_input,        
+        save_original_input, 
         *weights_and_biases,
     ) -> torch.Tensor:
         # pylint: disable=missing-function-docstring
@@ -198,15 +200,52 @@ class _GroupedLinear(torch.autograd.Function):
                     inputmats = [None] * num_gemms
                     inputmats[0] = inp
                 else:
-                    for inputmat in inputmats:
-                        from ...musa.pytorch.tensor.mtfp8_tensor_base import MTFP8TensorBase
-                        if isinstance(inputmat, MTFP8TensorBase) and inputmat._rowwise_data.numel() != 0:
-                            inputmat._rowwise_data = None
-                            inputmat._rowwise_scale_inv = None
+                    from transformer_engine.musa.pytorch.tensor.mtfp8_tensor_base import MTFP8TensorBase
+                    if isinstance(inputmats[0], MTFP8TensorBase):
+                        rowwise_data_list = []
+                        rowwise_scale_inv_list = []
+                        for inputmat in inputmats:
+                            if inputmat._rowwise_data.numel() != 0:
+                                inputmat._rowwise_data = None
+                                inputmat._rowwise_scale_inv = None
+                                rowwise_data_list.append(None)
+                                rowwise_scale_inv_list.append(None)
+                            else:
+                                rowwise_data_list.append(inputmat._rowwise_data)
+                                rowwise_scale_inv_list.append(inputmat._rowwise_scale_inv)
+
+                fine_grained_offload_handler = get_fine_grained_offload_handler()
+                if fine_grained_offload and not fine_grained_offload_handler.is_last_2_pipeline_parallel_stage() and not fine_grained_offload_handler.is_last_batch_last_layer():
+                    if isinstance(inputmats[0], torch.Tensor):
+                        ctx.offload_dtype = None
+                        fc1_input = inp
+                    else:
+                        ctx.input_quantizers = input_quantizers
+                        ctx.fc1_input_fp8_dtype = inputmats[0]._fp8_dtype
+
+                        if isinstance(inputmats[0], Float8TensorBase):
+                            ctx.offload_dtype = "fp8_tensor"
+                            fc1_input = torch.concat([inputmat._data for inputmat in inputmats])
+                            ctx.fc1_input_scale_inv = [inputmat._scale_inv for inputmat in inputmats]
+
+                        elif isinstance(inputmats[0], MTFP8TensorBase):
+                            ctx.offload_dtype = "fp8_block"
+                            fc1_input = torch.concat([inputmat._columnwise_data for inputmat in inputmats])
+                            ctx.fc1_input_columnwise_scale_inv = [inputmat._columnwise_scale_inv for inputmat in inputmats]
+                            ctx.rowwise_data = rowwise_data_list
+                            ctx.rowwise_scale_inv = rowwise_scale_inv_list
+
+                    set_offloading_param(fc1_input, 'fine_grained_offloading', 'moe_fc1_input')
+                    ctx.tensor_tags = fine_grained_offload_handler.register_offload(fc1_input)
+                    tensors_to_save, tensor_objects = prepare_for_saving(*weights_fp8, *biases)
+                else:
+                    ctx.tensor_tags = None
+                    tensors_to_save, tensor_objects = prepare_for_saving(*inputmats, *weights_fp8, *biases)
             else:
+                ctx.tensor_tags = None
                 inputmats = [None] * num_gemms
-            
-            tensors_to_save, tensor_objects = prepare_for_saving(*inputmats, *weights_fp8, *biases)
+                tensors_to_save, tensor_objects = prepare_for_saving(*inputmats, *weights_fp8, *biases)
+
             ctx.save_for_backward(*tensors_to_save)
             ctx.tensor_objects = tensor_objects
 
@@ -236,7 +275,8 @@ class _GroupedLinear(torch.autograd.Function):
                     FP8GlobalStateManager.IS_FIRST_FP8_MODULE = _first_fp8_module
             ctx.save_original_input = save_original_input
             ctx.input_quantizers = input_quantizers
-            ctx.in_features = in_features            
+            ctx.in_features = in_features
+            ctx.fine_grained_offload = fine_grained_offload            
 
         # [*, in_features] -> [*, out_features] except first dimension changes for SP
         return out.view(-1, *inp.shape[1:-1], out.shape[-1])
@@ -247,10 +287,48 @@ class _GroupedLinear(torch.autograd.Function):
         with torch.cuda.nvtx.range("_GroupedLinear_backward"):
             saved_tensors = restore_from_saved(ctx.tensor_objects, ctx.saved_tensors)
             N = ctx.num_gemms
-            inputmats = saved_tensors[:N]
-            weights = saved_tensors[N : 2 * N]
-            biases = saved_tensors[2 * N : 3 * N]
             main_grads = ctx.main_grads
+            if ctx.tensor_tags == None:
+                inputmats = saved_tensors[:N]
+                weights = saved_tensors[N : 2 * N]
+                biases = saved_tensors[2 * N : 3 * N]
+            else:
+                fine_grained_offload_handler = get_fine_grained_offload_handler()
+                assert not fine_grained_offload_handler.is_last_2_pipeline_parallel_stage() and not fine_grained_offload_handler.is_last_batch_last_layer()
+                fc1_input = fine_grained_offload_handler.get_reloaded(ctx.tensor_tags)
+                inputmats = torch.split(fc1_input, ctx.m_splits)
+                if ctx.offload_dtype == "fp8_tensor":
+                    inputmats = [
+                        Float8TensorBase(
+                            data=inputmat,
+                            fp8_scale_inv=scale_inv,
+                            fp8_dtype=ctx.fc1_input_fp8_dtype,
+                            quantizer=quantizer
+                        )
+                        for inputmat, scale_inv, quantizer in zip(inputmats, ctx.fc1_input_scale_inv, ctx.input_quantizers)
+                    ]
+                elif ctx.offload_dtype == "fp8_block":
+                    from transformer_engine.musa.pytorch.tensor.mtfp8_tensor_base import MTFP8TensorBase
+                    inputmats = [
+                        MTFP8TensorBase(
+                            rowwise_data=rowwise_data,
+                            rowwise_scale_inv=rowwise_scale,
+                            columnwise_data=inputmat,
+                            columnwise_scale_inv=scale_inv,
+                            fp8_dtype=ctx.fc1_input_fp8_dtype,
+                            quantizer=quantizer,
+                        )
+                        for rowwise_data, rowwise_scale, inputmat, scale_inv, quantizer in 
+                        zip(ctx.rowwise_data, ctx.rowwise_scale_inv, inputmats, ctx.fc1_input_columnwise_scale_inv, ctx.input_quantizers)
+                    ]
+                else:
+                    # activation dtype bf16
+                    fc1_input.requires_grad = True
+                    inputmats_no_fp8 = torch.split(fc1_input.view(-1, ctx.in_features), ctx.m_splits)
+                    inputmats = [cast_if_needed(mat, ctx.activation_dtype) for mat in inputmats_no_fp8]
+
+                weights = saved_tensors[:N]
+                biases = saved_tensors[N : 2 * N]
 
             if ctx.cpu_offloading and ctx.fuse_wgrad_accumulation:  # TOSO
                 for i in ctx.num_gemms:
@@ -358,21 +436,6 @@ class _GroupedLinear(torch.autograd.Function):
 
                 if os.getenv("ENABLE_ZERO_BUBBLE", "0") == "0":
                     # Deallocate input tensor
-                    from ...musa.pytorch.tensor.mtfp8_tensor import MTFP8Quantizer, MTFP8TensorBase
-                    for inp in inputmats:
-                        if inp is not None:
-                            if isinstance(inp, MTFP8TensorBase):
-                                if inp._rowwise_data is not None:
-                                    inp._rowwise_data.data = torch.Tensor()
-                                if inp._rowwise_scale_inv is not None:
-                                    inp._rowwise_scale_inv.data = torch.Tensor()
-                                if inp._columnwise_data is not None:
-                                    inp._columnwise_data.data = torch.Tensor()
-                                if inp._columnwise_scale_inv is not None:
-                                    inp._columnwise_scale_inv.data = torch.Tensor()
-                            else:
-                                inp.data = torch.Tensor()
-
                     clear_tensor_data(*inputmats)
 
                 def handle_custom_ddp_from_mcore(w, wgrad):
@@ -426,9 +489,10 @@ class _GroupedLinear(torch.autograd.Function):
             None,
             None,
             None,
+            None,
             None,  # is_grad_enabled
             None,  # is_grad_enabled
-            None,            
+            None,  
             *wgrad_list,
             *grad_biases,
         )
@@ -505,7 +569,7 @@ class GroupedLinear(TransformerEngineBaseModule):
         ub_overlap_rs: bool = False,
         ub_overlap_ag: bool = False,
         ub_name: Optional[str] = None,
-        save_original_input: bool = False,        
+        save_original_input: bool = False,   
     ) -> None:
         super().__init__()
 
@@ -520,7 +584,7 @@ class GroupedLinear(TransformerEngineBaseModule):
         self.ub_overlap_rs = ub_overlap_rs
         self.ub_overlap_ag = ub_overlap_ag
         self.ub_name = ub_name
-        self.save_original_input = save_original_input        
+        self.save_original_input = save_original_input
         assert (
             not ub_overlap_rs and not ub_overlap_ag
         ), "GroupedLinear doesn't support Userbuffer overlap."
@@ -627,6 +691,7 @@ class GroupedLinear(TransformerEngineBaseModule):
         inp: torch.Tensor,
         m_splits: List[int],
         is_first_microbatch: Optional[bool] = None,
+        fine_grained_offload: bool = False,
     ) -> Union[torch.Tensor, Tuple[torch.Tensor, ...]]:
         """
         Apply the linear transformation to the input.
@@ -715,6 +780,7 @@ class GroupedLinear(TransformerEngineBaseModule):
                 grad_output_quantizers,
                 self.fuse_wgrad_accumulation,
                 is_cpu_offload_enabled(),
+                fine_grained_offload,
                 self.sequence_parallel,
                 self.activation_dtype,
                 torch.is_grad_enabled(),

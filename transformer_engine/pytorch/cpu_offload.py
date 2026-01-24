@@ -11,14 +11,21 @@ import torch
 
 from .tensor.float8_tensor import Float8Tensor
 
-__all__ = ["get_cpu_offload_context"]
+__all__ = [
+    "get_cpu_offload_context",
+    "get_fine_grained_offload_handler",
+    "get_fine_grained_offload_context",
+    "LaunchReloadFunction",
+    "WaitReloadFunction",
+    "FineGrainedOffloadLayerCounter",
+]
 
 CPUOffloadEnabled = False
 
 
 def set_offloading_param(tensor, param_name, value):
     """Set the type of the offloading needed for a tensor."""
-    assert param_name in ["weight_offloading", "activation_offloading"]
+    assert param_name in ["weight_offloading", "activation_offloading", "fine_grained_offloading"]
     if tensor is None:
         return
     if type(tensor) in [torch.Tensor, torch.nn.Parameter]:
@@ -28,6 +35,12 @@ def set_offloading_param(tensor, param_name, value):
         for tensor in data_tensors:
             if tensor is not None:
                 setattr(tensor, param_name, value)
+
+def has_acivation_offloading_param(tensor):
+    for param_name in ["activation_offloading", "fine_grained_offloading"]:
+        if hasattr(tensor, param_name):
+            return True
+    return False
 
 
 def is_cpu_offload_enabled() -> bool:
@@ -532,3 +545,288 @@ def get_cpu_offload_context(
             group_prefetch_offload_commit_async,
         )
     return nullcontext(), group_prefetch_offload_commit_async
+
+
+class _FineGrainedAsyncDoubleBufferGroupOffloadHandler(OffloadHandler):
+
+    def __init__(self) -> None:
+        # Data Structure to maintain reference to activation tensors
+        self.tensor_tag_to_state = {}
+        # Tracking the number of layers offloaded
+        self.current_layer_id = 0
+        # Tracking the number of microbatches offloaded
+        self.current_microbatch_id = 0
+
+        self.reloading_tensor = {}
+        self.to_offload_tensor = {}
+
+        # allocate streams and events for synchronization
+        self.d2h_stream = None
+        self.h2d_stream = None
+
+        self.OFFLOAD_TENSOR_ATTR_KEY = 'fine_grained_offloading'
+
+        self.num_layers = None
+        self.pp_size = None
+        self.is_pipeline_last_stage = None
+        self.num_microbatches = None
+
+        self.pin_memory_tensor_pool = {}
+        self.to_release_tensor = {}
+
+
+    def is_last_layer(self):
+        return self.is_pipeline_last_stage and self.current_layer_id >= self.num_layers - 1
+    
+    
+    def is_last_2_pipeline_parallel_stage(self):
+        from megatron.core.parallel_state import get_pipeline_model_parallel_rank, get_pipeline_model_parallel_world_size
+        pp_rank = get_pipeline_model_parallel_rank()
+        pp_size = get_pipeline_model_parallel_world_size()
+        return (pp_rank == (pp_size - 1)) or (pp_rank == (pp_size - 2))
+    
+    
+    def is_last_batch_last_layer(self):
+        return self.current_microbatch_id >= self.num_microbatches - 1 and self.current_layer_id >= self.num_layers - 1
+
+
+    def register_offload(self, src_tensor):
+        assert hasattr(src_tensor, self.OFFLOAD_TENSOR_ATTR_KEY)
+        tensor_name = getattr(src_tensor, self.OFFLOAD_TENSOR_ATTR_KEY)
+        tensor_tag = (self.current_microbatch_id, self.current_layer_id, tensor_name)
+        self.to_offload_tensor[tensor_tag] = src_tensor
+        return tensor_tag
+
+
+    def get_tag_from_name(self, tensor_name):
+        tensor_tag = (self.current_microbatch_id, self.current_layer_id, tensor_name)
+        return tensor_tag
+
+    
+    def launch_offload(self, tensor_name, offloading_microbatch_id = None, offloading_layer_id = None):
+        if self.d2h_stream is None:
+            self.d2h_stream = torch.cuda.Stream()
+        
+        if self.is_pipeline_last_stage:
+            return
+
+        if offloading_microbatch_id == None and offloading_layer_id == None:
+            if self.current_layer_id == 0:
+                offloading_microbatch_id = self.current_microbatch_id - 1
+                offloading_layer_id = self.num_layers - 1
+            else:
+                offloading_microbatch_id = self.current_microbatch_id
+                offloading_layer_id = self.current_layer_id - 1
+
+        copy_done_event = torch.cuda.Event()
+        tensor_tag = (offloading_microbatch_id, offloading_layer_id, tensor_name)
+        # print(f"launch offload :{tensor_tag}")
+        if tensor_tag not in self.to_offload_tensor:
+            # in fwd of current_microbatch == 0 and current_layer_id == 0
+            # print("launch offload : tensor_tag not in self.to_offload_tensor")
+            return 
+        src_tensor = self.to_offload_tensor.pop(tensor_tag)
+        token_num = src_tensor.size(0)
+        hidden_dim = src_tensor.size()[1:]
+        device = src_tensor.device
+        self.d2h_stream.wait_stream(torch.cuda.current_stream())
+        pin_memory_tag = (offloading_microbatch_id % self.pp_size, offloading_layer_id, tensor_name)
+        with torch.cuda.stream(self.d2h_stream):
+            existing_buffer = self.pin_memory_tensor_pool.get(pin_memory_tag)
+            # existing_buffer = self.pin_memory_tensor_pool.get(tensor_tag)
+            if existing_buffer is None or existing_buffer.size() < src_tensor.size():
+                buffer_shape = [token_num * 2] + list(hidden_dim)
+                new_buffer = torch.empty(
+                    buffer_shape,
+                    dtype=src_tensor.dtype,
+                    layout=src_tensor.layout,
+                    device="cpu",
+                    pin_memory=True,
+                )
+                self.pin_memory_tensor_pool[pin_memory_tag] = new_buffer
+                # self.pin_memory_tensor_pool[tensor_tag] = new_buffer
+
+            # buffer = self.pin_memory_tensor_pool[tensor_tag]
+            buffer = self.pin_memory_tensor_pool[pin_memory_tag]
+            buffer[:token_num, ...].copy_(src_tensor.detach(), non_blocking=True)
+            cpu_backup = buffer[:token_num, ...]
+
+            copy_done_event.record(stream=self.d2h_stream)
+
+        self.to_release_tensor[tensor_tag] = (copy_done_event, src_tensor)
+
+        state = (src_tensor, cpu_backup, copy_done_event, src_tensor.untyped_storage().size())
+        self.tensor_tag_to_state[tensor_tag] = state
+
+        return tensor_tag
+    
+    
+    def wait_offload(self, tensor_name, offloading_microbatch_id = None, offloading_layer_id = None):
+        if offloading_microbatch_id == None and offloading_layer_id == None:
+            if self.current_layer_id == 0:
+                offloading_microbatch_id = self.current_microbatch_id - 1
+                offloading_layer_id = self.num_layers - 1
+            else:
+                offloading_microbatch_id = self.current_microbatch_id
+                offloading_layer_id = self.current_layer_id - 1
+        tensor_tag = (offloading_microbatch_id, offloading_layer_id, tensor_name)
+        # print(f"wait offload :{tensor_tag}")
+        if not tensor_tag in self.to_release_tensor:
+            # print("wait offload : ot tensor_tag in self.to_release_tensor")
+            return
+        copy_done_event, release_src_tensor = self.to_release_tensor.pop(tensor_tag)
+        copy_done_event.synchronize() # TODO: use .wait() to check the stream with copy engine (d2h / h2d / all2all)
+        release_src_tensor.untyped_storage().resize_(0)
+
+
+    def launch_reload(self, tensor_name, reloading_microbatch_id = None, reloading_layer_id = None):
+        if self.h2d_stream is None:
+            self.h2d_stream = torch.cuda.Stream()
+        # reload actication of layer i-1 in the bwd of layer i (when i > 0)
+        # reload actication of last layer of next microbatch in the bwd of layer 0 
+        if reloading_microbatch_id == None and reloading_layer_id == None:
+            if self.current_layer_id == 0:
+                reloading_microbatch_id = self.current_microbatch_id + 1
+                reloading_layer_id = self.num_layers - 1
+            else:
+                reloading_microbatch_id = self.current_microbatch_id
+                reloading_layer_id = self.current_layer_id - 1
+        tensor_tag = (reloading_microbatch_id, reloading_layer_id, tensor_name)
+        # print(f"launch reload :{tensor_tag}")
+        if not tensor_tag in self.tensor_tag_to_state:
+            # in the bwd of layer 0 of the last mircobatch
+            # print(f"launch reload : not tensor_tag in self.tensor_tag_to_state")
+            return
+        (src_tensor, cpu_backup, copy_done_event, untyped_size) = self.tensor_tag_to_state.pop(tensor_tag)
+
+        copy_done_event = torch.cuda.Event()
+        self.h2d_stream.wait_stream(torch.cuda.current_stream())
+        # with torch.cuda.stream(self.h2d_stream):
+        src_tensor.untyped_storage().resize_(untyped_size)
+        src_tensor.copy_(cpu_backup, non_blocking=True)
+        copy_done_event.record(stream=self.h2d_stream)
+        state = (copy_done_event, src_tensor)
+        self.reloading_tensor[tensor_tag] = state
+            
+
+    def wait_reload(self, tensor_name, reloading_microbatch_id = None, reloading_layer_id = None):
+        if reloading_microbatch_id == None and reloading_layer_id == None:
+            if self.current_layer_id == 0:
+                reloading_microbatch_id = self.current_microbatch_id + 1
+                reloading_layer_id = self.num_layers - 1
+            else:
+                reloading_microbatch_id = self.current_microbatch_id
+                reloading_layer_id = self.current_layer_id - 1
+        tensor_tag = (reloading_microbatch_id, reloading_layer_id, tensor_name)
+        # print(f"wait reload :{tensor_tag}")
+        if not tensor_tag in self.reloading_tensor:
+            # in the bwd of layer 0 of the last mircobatch
+            # print(f"launch reload : not tensor_tag in self.reloading_tensor")
+            return
+        (copy_done_event, device_tensor) = self.reloading_tensor[tensor_tag]
+        copy_done_event.synchronize() # TODO: use .wait() to check the stream with copy engine (d2h / h2d / all2all)
+        return
+    
+    
+    def get_reloaded(self, tensor_tag):
+        (copy_done_event, device_tensor) = self.reloading_tensor.pop(tensor_tag)
+        return device_tensor
+    
+    
+    def tensor_push(self, tensor: torch.Tensor, **kwargs) -> Any:
+        if hasattr(tensor, self.OFFLOAD_TENSOR_ATTR_KEY):
+            return self.register_offload(tensor)
+        return tensor
+    
+    
+    def tensor_pop(self, tensor_tag, **kwargs):
+        if tensor_tag in self.reloading_tensor:
+            return self.wait_reload(tensor_tag)
+        return tensor_tag
+
+
+    def start_microbatch_forward(self, current_microbatch_id):
+        self.current_microbatch_id = current_microbatch_id
+        self.current_layer_id = 0
+        # print(f"fwd start on batch id: {current_microbatch_id}")
+
+
+    def start_microbatch_backward(self, current_microbatch_id):
+        self.current_microbatch_id = current_microbatch_id
+        self.current_layer_id = self.num_layers
+        # print(f"bwd start on batch id: {current_microbatch_id}")
+
+
+
+_fg_offload_handler_instance = _FineGrainedAsyncDoubleBufferGroupOffloadHandler()
+
+
+def get_fine_grained_offload_handler():
+    return _fg_offload_handler_instance
+
+
+
+# class CpuOffloadHookWithFineGrainedOffloadHandler(CpuOffloadSavedTensorHook):
+
+#     def __init__(self):
+#         self.offload_handler = get_fine_grained_offload_handler()
+#         self.handler_extra_kwargs = {}
+#         super().__init__()
+
+#     def on_save_for_backward(self, tensor: torch.Tensor) -> Any:
+#         retrieve_identifier = self.offload_handler.tensor_push(tensor, **self.handler_extra_kwargs)
+#         return retrieve_identifier
+    
+#     def on_get_saved_tensor(self, saved_state: Any) -> torch.Tensor:
+#         tensor = self.offload_handler.tensor_pop(saved_state, **self.handler_extra_kwargs)
+#         return tensor
+    
+
+class LaunchReloadFunction(torch.autograd.Function):
+    @staticmethod
+    def forward(ctx, tensor, fine_grained_tensor_name):
+        ctx.fine_grained_tensor_name = fine_grained_tensor_name
+        # print(f"LaunchReloadFunction fwd on {fine_grained_tensor_name}")
+        return tensor
+    
+    @staticmethod
+    def backward(ctx, grad_output):
+        cpu_offload_handler = get_fine_grained_offload_handler()
+        # print(f"LaunchReloadFunction bwd on {ctx.fine_grained_tensor_name}")
+        cpu_offload_handler.launch_reload(ctx.fine_grained_tensor_name)
+        return grad_output, None
+    
+
+class WaitReloadFunction(torch.autograd.Function):
+    @staticmethod
+    def forward(ctx, tensor, fine_grained_tensor_name):
+        ctx.fine_grained_tensor_name = fine_grained_tensor_name
+        # print(f"WaitReloadFunction fwd on {fine_grained_tensor_name}")
+        return tensor
+    
+    @staticmethod
+    def backward(ctx, grad_output):
+        cpu_offload_handler = get_fine_grained_offload_handler()
+        # print(f"WaitReloadFunction bwd on {ctx.fine_grained_tensor_name}")
+        cpu_offload_handler.wait_reload(ctx.fine_grained_tensor_name)
+        return grad_output, None
+
+
+class FineGrainedOffloadLayerCounter(torch.autograd.Function):
+    @staticmethod
+    def forward(ctx, tensor):
+        cpu_offload_handler = get_fine_grained_offload_handler()
+        cpu_offload_handler.current_layer_id += 1
+        # print(f'finish layer forward {cpu_offload_handler.current_microbatch_id}, {cpu_offload_handler.current_layer_id}')
+        return tensor
+    
+    @staticmethod
+    def backward(ctx, grad_output):
+        cpu_offload_handler = get_fine_grained_offload_handler()
+        cpu_offload_handler.current_layer_id -= 1
+        # print(f'start layer backward {cpu_offload_handler.current_microbatch_id}, {cpu_offload_handler.current_layer_id}')
+        return grad_output, None
+
+
+# def get_fine_grained_offload_context():
+#     return CpuOffloadHookWithFineGrainedOffloadHandler()
