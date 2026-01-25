@@ -701,12 +701,12 @@ class _FineGrainedAsyncDoubleBufferGroupOffloadHandler(OffloadHandler):
 
         copy_done_event = torch.cuda.Event()
         self.h2d_stream.wait_stream(torch.cuda.current_stream())
-        # with torch.cuda.stream(self.h2d_stream):
-        src_tensor.untyped_storage().resize_(untyped_size)
-        src_tensor.copy_(cpu_backup, non_blocking=True)
-        copy_done_event.record(stream=self.h2d_stream)
-        state = (copy_done_event, src_tensor)
-        self.reloading_tensor[tensor_tag] = state
+        with torch.cuda.stream(self.h2d_stream):
+            src_tensor.untyped_storage().resize_(untyped_size)
+            src_tensor.copy_(cpu_backup, non_blocking=True)
+            copy_done_event.record(stream=self.h2d_stream)
+            state = (copy_done_event, src_tensor)
+            self.reloading_tensor[tensor_tag] = state
             
 
     def wait_reload(self, tensor_name, reloading_microbatch_id = None, reloading_layer_id = None):
