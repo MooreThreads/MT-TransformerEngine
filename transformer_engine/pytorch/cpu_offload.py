@@ -572,10 +572,30 @@ class _FineGrainedAsyncDoubleBufferGroupOffloadHandler(OffloadHandler):
         self.num_microbatches = None
 
         self.pin_memory_tensor_pool = {}
+        self.pin_memory_tensor_pool_metadata = {}
         self.to_release_tensor = {}
         
         self.moe_layer_pattern = []
 
+    def release_cpu_pinmem_pool(self):
+        for key in self.pin_memory_tensor_pool.keys():
+            self.pin_memory_tensor_pool_metadata[key] = (
+                self.pin_memory_tensor_pool[key].shape, 
+                self.pin_memory_tensor_pool[key].dtype,
+                self.pin_memory_tensor_pool[key].layout)
+            self.pin_memory_tensor_pool[key].untyped_storage().resize_(0)
+        self.pin_memory_tensor_pool = {}
+    
+    def resume_cpu_pinmem_pool(self):
+        for key in self.pin_memory_tensor_pool_metadata.keys():
+            metadata = self.pin_memory_tensor_pool_metadata[key]
+            self.pin_memory_tensor_pool[key] = torch.empty(
+                    metadata[0],
+                    dtype=metadata[1],
+                    layout=metadata[2],
+                    device="cpu",
+                    pin_memory=True,
+                )
 
     def is_last_layer(self):
         return self.is_pipeline_last_stage and self.current_layer_id >= self.num_layers - 1
