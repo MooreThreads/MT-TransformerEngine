@@ -568,37 +568,56 @@ class _FineGrainedAsyncDoubleBufferGroupOffloadHandler(OffloadHandler):
 
         self.num_layers = None
         self.pp_size = None
-        self.is_pipeline_last_stage = None
         self.num_microbatches = None
 
         self.pin_memory_tensor_pool = {}
         self.pin_memory_tensor_pool_metadata = {}
+        self.pin_memory_tensor_pool_released = False
         self.to_release_tensor = {}
         
         self.moe_layer_pattern = []
 
     def release_cpu_pinmem_pool(self):
-        for key in self.pin_memory_tensor_pool.keys():
-            self.pin_memory_tensor_pool_metadata[key] = (
-                self.pin_memory_tensor_pool[key].shape, 
-                self.pin_memory_tensor_pool[key].dtype,
-                self.pin_memory_tensor_pool[key].layout)
-            self.pin_memory_tensor_pool[key].untyped_storage().resize_(0)
-        self.pin_memory_tensor_pool = {}
-    
-    def resume_cpu_pinmem_pool(self):
-        for key in self.pin_memory_tensor_pool_metadata.keys():
-            metadata = self.pin_memory_tensor_pool_metadata[key]
-            self.pin_memory_tensor_pool[key] = torch.empty(
-                    metadata[0],
-                    dtype=metadata[1],
-                    layout=metadata[2],
-                    device="cpu",
-                    pin_memory=True,
-                )
+        torch.cuda.synchronize()
+        self.tensor_tag_to_state.clear()
+        self.reloading_tensor.clear()
+        self.to_offload_tensor.clear()
+        self.to_release_tensor.clear()
 
-    def is_last_layer(self):
-        return self.is_pipeline_last_stage and self.current_layer_id >= self.num_layers - 1
+        while self.pin_memory_tensor_pool:
+            key, buffer = self.pin_memory_tensor_pool.popitem()
+            self.pin_memory_tensor_pool_metadata[key] = (
+                buffer.shape, 
+                buffer.dtype,
+                buffer.layout)
+            import sys
+            del buffer
+        self.pin_memory_tensor_pool.clear()
+        
+        import gc
+        gc.collect()
+        import torch_musa
+        torch.distributed.barrier()
+        torch_musa._MUSAC._host_emptyCache()
+        torch.distributed.barrier()
+        self.pin_memory_tensor_pool_released = True
+    
+    def maybe_resume_cpu_pinmem_pool(self):
+        torch.cuda.synchronize()
+        self.pin_memory_tensor_pool = {}
+        if self.pin_memory_tensor_pool_released:
+            torch.distributed.barrier()
+            for key in self.pin_memory_tensor_pool_metadata.keys():
+                metadata = self.pin_memory_tensor_pool_metadata[key]
+                self.pin_memory_tensor_pool[key] = torch.empty(
+                        metadata[0],
+                        dtype=metadata[1],
+                        layout=metadata[2],
+                        device="cpu",
+                        pin_memory=False,
+                    )
+            torch.distributed.barrier()
+            self.pin_memory_tensor_pool_released = False
     
     
     def is_last_2_pipeline_parallel_stage(self):
@@ -627,10 +646,11 @@ class _FineGrainedAsyncDoubleBufferGroupOffloadHandler(OffloadHandler):
 
     
     def launch_offload(self, tensor_name, offloading_microbatch_id = None, offloading_layer_id = None):
+        # print(f"launch_offload current_layer_id={self.current_layer_id}")
         if self.d2h_stream is None:
             self.d2h_stream = torch.cuda.Stream()
         
-        if self.is_pipeline_last_stage:
+        if self.is_last_2_pipeline_parallel_stage() or self.moe_layer_pattern[self.current_layer_id] == 0:
             return
 
         if offloading_microbatch_id == None and offloading_layer_id == None:
@@ -697,6 +717,10 @@ class _FineGrainedAsyncDoubleBufferGroupOffloadHandler(OffloadHandler):
     
     
     def wait_offload(self, tensor_name, offloading_microbatch_id = None, offloading_layer_id = None):
+        # print(f"wait_offload current_layer_id={self.current_layer_id}")
+        if self.is_last_2_pipeline_parallel_stage() or self.moe_layer_pattern[self.current_layer_id] == 0:
+            return
+        
         if offloading_microbatch_id == None and offloading_layer_id == None:
             if self.current_layer_id == 0:
                 offloading_microbatch_id = self.current_microbatch_id - 1
@@ -729,6 +753,10 @@ class _FineGrainedAsyncDoubleBufferGroupOffloadHandler(OffloadHandler):
 
 
     def launch_reload(self, tensor_name, reloading_microbatch_id = None, reloading_layer_id = None):
+        # print(f"launch_reload current_layer_id={self.current_layer_id}")
+        if self.is_last_2_pipeline_parallel_stage() or self.moe_layer_pattern[self.current_layer_id] == 0:
+            return
+        
         if self.h2d_stream is None:
             self.h2d_stream = torch.cuda.Stream()
         # reload actication of layer i-1 in the bwd of layer i (when i > 0)
@@ -772,6 +800,10 @@ class _FineGrainedAsyncDoubleBufferGroupOffloadHandler(OffloadHandler):
             
 
     def wait_reload(self, tensor_name, reloading_microbatch_id = None, reloading_layer_id = None):
+        # print(f"wait_reload current_layer_id={self.current_layer_id}")
+        if self.is_last_2_pipeline_parallel_stage() or self.moe_layer_pattern[self.current_layer_id] == 0:
+            return
+        
         if reloading_microbatch_id == None and reloading_layer_id == None:
             if self.current_layer_id == 0:
                 reloading_microbatch_id = self.current_microbatch_id + 1
@@ -821,15 +853,15 @@ class _FineGrainedAsyncDoubleBufferGroupOffloadHandler(OffloadHandler):
 
 
     def start_microbatch_forward(self, current_microbatch_id):
+        # print(f"fwd start on batch id: {current_microbatch_id}")
         self.current_microbatch_id = current_microbatch_id
         self.current_layer_id = 0
-        # print(f"fwd start on batch id: {current_microbatch_id}")
 
 
     def start_microbatch_backward(self, current_microbatch_id):
+        # print(f"bwd start on batch id: {current_microbatch_id}")
         self.current_microbatch_id = current_microbatch_id
         self.current_layer_id = self.num_layers
-        # print(f"bwd start on batch id: {current_microbatch_id}")
 
 
 
