@@ -4,6 +4,8 @@
 #include "musa_driver.h"
 #include "musa_runtime.h"
 
+inline __device__ constexpr float global_amax_min = 1e-15f;
+
 namespace transformer_engine::mtfp8 {
 
 inline constexpr size_t io_bytes = 16;
@@ -36,8 +38,6 @@ inline size_t next_power_of_2(size_t n) {
 inline size_t ceil_div(size_t a, size_t b) {
   return (a + b - 1) / b;
 }
-
-inline __device__ float global_amax_min = 1e-15;
 
 template <size_t vlen>
 struct VlenTrait {

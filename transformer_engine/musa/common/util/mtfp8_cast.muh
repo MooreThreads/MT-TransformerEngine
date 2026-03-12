@@ -3,6 +3,7 @@
 
 #include "mtfp8_groupwise_quantize.muh"
 #include "mtfp8_blockwise_quantize.muh"
+#include "mtfp8_cast_transpose.h"
 
 namespace transformer_engine {
 
@@ -31,13 +32,17 @@ inline void mtfp8_quantize_dispatch(
           group_size = next_power_of_2(N / sinv_n);
         }
         if (M == 1 || M == sinv_m) {
-          // 1 * N
-          fp8_groupwise_cast<Param, OP>(
-              reinterpret_cast<const IType*>(input->data.dptr),
-              reinterpret_cast<const CType*>(noop->data.dptr),
-              reinterpret_cast<OType*>(output->data.dptr),
-              reinterpret_cast<CType*>(output->scale_inv.dptr),
-              M, N, group_size, param, stream);
+          if (group_size == 128) {
+            mtfp8_rowwise_cast(input, noop, output, stream);
+          }
+          else {
+            fp8_groupwise_cast<Param, OP>(
+                reinterpret_cast<const IType*>(input->data.dptr),
+                reinterpret_cast<const CType*>(noop->data.dptr),
+                reinterpret_cast<OType*>(output->data.dptr),
+                reinterpret_cast<CType*>(output->scale_inv.dptr),
+                M, N, group_size, param, stream);
+          }
         } else {
           // N * N
           fp8_blockwise_cast<Param, OP>(

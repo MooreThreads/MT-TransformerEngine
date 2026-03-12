@@ -378,16 +378,16 @@ std::vector<py::object> fused_multi_quantize(std::vector<py::handle> input_list,
   // Choose implementation
   // Note: Currently only have fused kernel for FP8 cast-transpose
   bool with_fused_kernel = true;
-  for (size_t i = 0; i < nvte_tensor_output_list.size(); i++) {
-    const auto& tensor = nvte_tensor_output_list[i];
-    if (nvte_tensor_scaling_mode(tensor) != NVTE_DELAYED_TENSOR_SCALING) {
+    for (int i = 0; i < nvte_tensor_output_list.size(); i++) {
+    const auto tensor = nvte_tensor_output_list[i];
+    if (nvte_tensor_scaling_mode(tensor) != NVTE_MTFP8_BLOCK_SCALING) {
       with_fused_kernel = false;
       break;
     }
-    if (nvte_tensor_columnwise_data(tensor) == nullptr) {
-      with_fused_kernel = false;
-      break;
-    }
+    // if (nvte_tensor_columnwise_data(tensor) == nullptr) {
+    //   with_fused_kernel = false;
+    //   break;
+    // }
   }
 
   // Launch TE kernel

@@ -118,11 +118,6 @@ class _GroupedLinear(torch.autograd.Function):
                     ),
                 )
                 
-                # HACK:(Xiaoteng.Cui) To ensure casted output tensor's precision, MTFP8Quantizer needs both rowwise and columnwise usage set as a temporary workaround.
-                from ...musa.pytorch.tensor.mtfp8_tensor import MTFP8Quantizer
-                if isinstance(input_quantizer, MTFP8Quantizer):
-                    input_quantizer.set_usage(rowwise=True, columnwise=True)
-                
             columnwise_usage = is_grad_enabled and inp.requires_grad
             if not columnwise_usage:
                 columnwise_usage = (
@@ -403,9 +398,7 @@ class _GroupedLinear(torch.autograd.Function):
                             if isinstance(input_quantizer, Float8Quantizer):
                                 input_quantizer.set_usage(rowwise=True, columnwise=True)
                             else:
-                                input_quantizer.set_usage(rowwise=True, columnwise=True) 
-                                # HACK (Xiaoteng.Cui): In fact, rowwise should be False here, but MTFP8Quantizer will raise NVTECHECK error. 
-                                # MTFP8Quantizer needs both rowwise and columnwise usage set as a temporary workaround.
+                                input_quantizer.set_usage(rowwise=False, columnwise=True)
                     inputmats: list
                     if ctx.fp8:
                         inputmats = tex.fused_multi_quantize(

@@ -226,11 +226,6 @@ class _LayerNormLinear(torch.autograd.Function):
                 if fp8:
                     if not isinstance(ln_out, QuantizedTensor):
                         input_quantizer.set_usage(rowwise=True, columnwise=backward_needs_input)
-                        
-                        # HACK:(Xiaoteng.Cui) To ensure casted output tensor's precision, MTFP8Quantizer needs both rowwise and columnwise usage set as a temporary workaround.
-                        from ...musa.pytorch.tensor.mtfp8_tensor import MTFP8Quantizer
-                        if isinstance(input_quantizer, MTFP8Quantizer):
-                            input_quantizer.set_usage(rowwise=True, columnwise=True)
                             
                         ln_out = input_quantizer(ln_out)
                     elif backward_needs_input:

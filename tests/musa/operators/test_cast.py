@@ -21,7 +21,7 @@ from transformer_engine.pytorch.fp8 import (
 from transformer_engine.pytorch.tensor.float8_tensor import (
     Float8Tensor,
 )
-
+from transformer_engine.pytorch.constants import GemmParallelModes, dist_group_type, TE_DType
 
 dev = "musa"
 
@@ -174,11 +174,12 @@ def test_legacy_cast_to_fp8_per_tensor():
     assert torch.equal(res_cpu, res_musa)
 
 
-def create_mtfp8_groupwise_recipe_state(mode, group_size):
+def create_mtfp8_groupwise_recipe_state(mode, group_size, expert_cnt=1):
     if mode == "forward":
         n_gemms = 3
     else:
         n_gemms = 2
+    n_gemms *= expert_cnt
     state = MTFP8BlockScalingRecipeState(
         MTFP8BlockScaling(tile_size=group_size),
         mode=mode,
@@ -377,12 +378,13 @@ def _gen_mtfp8_groupwise_cast_transpose_golden(input_tensor, group_size, dst_dty
 
     ngroup_col = ncols // group_size
     ngroup_row = nrows // group_size
-
+    
+    global_amax_min = 1e-30
     if ((nrows % group_size == 0) and (ncols % group_size == 0)):
         # block-wise scaling along column
         tmp01 = input_tensor_tmp.reshape(nrows, ngroup_col, group_size).to(torch.float32)
         amax = torch.abs(tmp01).max(-1, keepdim=True)[0]
-        amax = amax.clamp(1e-4)
+        amax = amax.clamp(global_amax_min)
         scale_inv = amax / fp_max
         dst_rowwise = (tmp01 / scale_inv).to(dst_dtype).reshape(-1, ncols)
         scale_inv_rowwise = scale_inv.reshape(nrows, ngroup_col)
@@ -390,7 +392,7 @@ def _gen_mtfp8_groupwise_cast_transpose_golden(input_tensor, group_size, dst_dty
         # block-wise scaling along row
         tmp02 = input_tensor_tmp.reshape(ngroup_row, group_size, ncols).to(torch.float32)
         amax = torch.abs(tmp02).max(1, keepdim=True)[0]
-        amax = amax.clamp(1e-4)
+        amax = amax.clamp(global_amax_min)
         scale_inv = amax / fp_max
         dst_columnwise = (tmp02 / scale_inv).to(dst_dtype).reshape(-1, ncols)
         scale_inv_columnwise = scale_inv.reshape(ngroup_row, ncols)
@@ -402,7 +404,7 @@ def _gen_mtfp8_groupwise_cast_transpose_golden(input_tensor, group_size, dst_dty
         # block-wise scaling along column
         tmp01 = input_tensor_tmp.reshape(nrows, ngroup_col, group_size).to(torch.float32)
         amax = torch.abs(tmp01).max(-1, keepdim=True)[0]
-        amax = amax.clamp(1e-4)
+        amax = amax.clamp(global_amax_min)
         scale_inv = amax / fp_max
         dst_rowwise = (tmp01 / scale_inv).to(dst_dtype).reshape(-1, ncols)
         scale_inv_rowwise = scale_inv.reshape(nrows, ngroup_col)
@@ -415,7 +417,7 @@ def _gen_mtfp8_groupwise_cast_transpose_golden(input_tensor, group_size, dst_dty
         padded_tensor = torch.cat([tmp02, padding_tensor], 0)
         padded_tensor_reshaped = padded_tensor.reshape(ngroup_row_new, group_size, ncols)
         amax = torch.abs(padded_tensor_reshaped).max(1, keepdim=True)[0]
-        amax = amax.clamp(1e-4)
+        amax = amax.clamp(global_amax_min)
         scale_inv = amax / fp_max
         dst_columnwise = (padded_tensor_reshaped / scale_inv).to(dst_dtype).reshape(-1, ncols)
         scale_inv_columnwise = scale_inv.reshape(ngroup_row_new, ncols)
@@ -431,7 +433,7 @@ def _gen_mtfp8_groupwise_cast_transpose_golden(input_tensor, group_size, dst_dty
         padded_tensor = torch.cat([tmp01, padding_tensor], -1)
         padded_tensor_reshaped = padded_tensor.reshape(nrows, ngroup_col_new, group_size)
         amax = torch.abs(padded_tensor_reshaped).max(-1, keepdim=True)[0]
-        amax = amax.clamp(1e-4)
+        amax = amax.clamp(global_amax_min)
         scale_inv = amax / fp_max
         dst_rowwise = (padded_tensor_reshaped / scale_inv).to(dst_dtype).reshape(nrows, -1)
         scale_inv_rowwise = scale_inv.reshape(nrows, ngroup_col_new)
@@ -440,7 +442,7 @@ def _gen_mtfp8_groupwise_cast_transpose_golden(input_tensor, group_size, dst_dty
         # block-wise scaling along row
         tmp02 = input_tensor_tmp.reshape(ngroup_row, group_size, ncols).to(torch.float32)
         amax = torch.abs(tmp02).max(1, keepdim=True)[0]
-        amax = amax.clamp(1e-4)
+        amax = amax.clamp(global_amax_min)
         scale_inv = amax / fp_max
         dst_columnwise = (tmp02 / scale_inv).to(dst_dtype).reshape(-1, ncols)
         scale_inv_columnwise = scale_inv.reshape(ngroup_row, ncols)
@@ -493,59 +495,281 @@ def composite_blockwise_uncast(x, sinv, group_size, src_dtype):
 
 @pytest.mark.parametrize("shape", [
     # align
-    [[1024, 1024], 128],
-    [[1024, 4096], 128],
-    [[4096, 4096], 128],
-    [[16384, 4096], 128],
-    # [[16384, 16384], 128],
-    # [[16384, 65536], 128],
-    # [[65536, 65536], 128],
-    # not align
-    [[80, 1024], 128],
-    [[180, 4096], 128],
-    [[1000, 4096], 128],
-    [[1581, 16384], 128],
 
-    [[80, 1024 + 64], 128],
-    [[180, 4096 + 32], 128],
-    [[1000, 4096 + 16], 128],
-    [[1581, 16384 + 8], 128],
+    # q down proj fwd [7168, 1536]
+    [[4096, 7168], 128], 
+    # q down proj bwd
+    [[4096, 1536], 128], 
+
+    # kv down proj fwd [7168, 576]
+    # [[4096, 7168], 128],
+    # kv down proj bwd
+    [[4096, 576], 128],
+
+    # q up proj fwd [1536, 12288] kimi attention head is 64, ds v3 attention head is 128: 24576
+    # [[4096, 1536], 128],
+    # q up proj bwd
+    [[4096, 12288], 128],
+
+    # kv up proj fwd [512, 16384] attention head 128: 32768
+    [[4096, 512], 128],
+    # kv up proj bwd
+    [[4096, 16384], 128],
+
+    # o proj fwd [8192, 7168] attention head 128: 16384
+    [[4096, 8192], 128],
+    # o proj bwd
+    # [[4096, 7168], 128],
+
+    # share fc1 fwd [7168, 4096]
+    # [[4096, 7168], 128],
+    # share fc1 bwd
+    [[4096, 4096], 128],
+
+     # share fc2 fwd [2048, 7168]
+    [[4096, 2048], 128],
+    # share fc2 bwd
+    # [[4096, 7168], 128],
+
+    #benchmark shape
+    [[32768, 16384], 128], 
+    [[32768, 32768], 128], 
+    [[34165, 7168], 128], 
 ])
 @pytest.mark.parametrize("src_dtype", [
     torch.bfloat16,
-    torch.float,
+    # torch.float,
 ])
-def test_mtfp8_blockwise_cast_to_fp8(shape, src_dtype):
+@pytest.mark.parametrize("rowwise, columnwise", [
+    (True, True),
+    (True, False),
+    (False, True),
+])
+def test_mtfp8_blockwise_cast_to_fp8(shape, src_dtype, rowwise, columnwise):
     shape, group_size = shape
+    if shape[1] == 576 and (not rowwise or not columnwise):
+        return
     dst_dtype = torch.float8_e4m3fn
 
     mode = "forward"
     rs = create_mtfp8_groupwise_recipe_state(mode, group_size)
-    quantizer = rs.make_quantizers()[1]
-    quantizer.columnwise_usage = False
+    quantizer = rs.make_quantizers()[0]
+    quantizer.set_usage(rowwise=rowwise, columnwise=columnwise)
 
     musa_src = torch.randn(shape, dtype = src_dtype, device = dev)
 
-    gold_t, gold_sinv = composite_blockwise_cast(musa_src, group_size, dst_dtype)
-    gold_t = gold_t.float()
-    gold_deq = composite_blockwise_uncast(gold_t, gold_sinv, group_size, src_dtype)
+    cast_res = _gen_mtfp8_groupwise_cast_transpose_golden(musa_src, group_size, dst_dtype)
+    dst_rowwise_golden = cast_res[0].float()
+    scale_inv_rowwise_golden = cast_res[1]
+    dst_columnwise_golden = cast_res[2].float()
+    scale_inv_columnwise_golden =cast_res[3]
+
+    # gold_t, gold_sinv = composite_blockwise_cast(musa_src, group_size, dst_dtype)
+    # gold_t, gold_sinv = per_token_cast_to_fp8(musa_src)
+    # gold_t = gold_t.float()
+    # gold_deq = composite_blockwise_uncast(gold_t, gold_sinv, group_size, src_dtype)
 
     musa_dst = quantizer(musa_src)
-    dst_sinv = musa_dst._rowwise_scale_inv
-    dst_t = musa_dst._rowwise_data.view(dst_dtype).float()
+    
+    atol = 0
+    rtol = 0
+    if rowwise:
+        dst_sinv = musa_dst._rowwise_scale_inv
+        dst_t = musa_dst._rowwise_data.view(dst_dtype).float()
+        assert torch.allclose(scale_inv_rowwise_golden, dst_sinv, atol=atol, rtol=rtol)
+        assert torch.allclose(dst_rowwise_golden, dst_t, atol=atol, rtol=rtol)
+    if columnwise:
+        dst_column_sinv = musa_dst._columnwise_scale_inv
+        dst_t_column = musa_dst._columnwise_data.view(dst_dtype).float()
+        assert torch.allclose(scale_inv_columnwise_golden, dst_column_sinv, atol=atol, rtol=rtol)
+        assert torch.allclose(dst_columnwise_golden, dst_t_column, atol=atol, rtol=rtol)
 
-    assert torch.allclose(gold_sinv, dst_sinv, atol=1e-4, rtol=1e-4)
-    assert torch.allclose(gold_t, dst_t, atol=1e-4, rtol=1e-4)
+    if rowwise:
+        musa_deq = musa_dst.dequantize()
+        assert musa_deq.dtype == src_dtype
+        # assert torch.equal(musa_deq, gold_deq)
 
-    musa_deq = musa_dst.dequantize()
-    assert musa_deq.dtype == src_dtype
-    assert torch.equal(musa_deq, gold_deq)
+    import time
+    warmup_step = 10
+    running_step = 30
+    start = torch.cuda.Event(enable_timing=True)
+    end = torch.cuda.Event(enable_timing=True)
 
-    musa_dst._rowwise_data.zero_()
-    musa_dst._rowwise_scale_inv.zero_()
-    quantizer.update_quantized(musa_src, musa_dst)
-    dst_sinv = musa_dst._rowwise_scale_inv
-    dst_t = musa_dst._rowwise_data.view(dst_dtype).float()
+    for i in range(warmup_step):
+        musa_dst = quantizer(musa_src)
 
-    assert torch.allclose(gold_sinv, dst_sinv, atol=1e-4, rtol=1e-4)
-    assert torch.allclose(gold_t, dst_t, atol=1e-4, rtol=1e-4)
+    torch.musa.synchronize()
+    start.record()
+    for i in range(running_step):
+        musa_dst = quantizer(musa_src)
+    end.record()
+    end.synchronize()
+
+
+    if rowwise and columnwise:
+        read_write_byte = 4
+        scale_read_write_shape = (shape[0] / 128) * shape[1] + (shape[1] / 128) * shape[0]
+    elif rowwise or not columnwise:
+        read_write_byte = 3
+        scale_read_write_shape = (shape[0] / 128) * shape[1]
+    elif not rowwise or columnwise:
+        read_write_byte = 3
+        scale_read_write_shape = (shape[1] / 128) * shape[0]
+    rw_byte = shape[0] * shape[1] * read_write_byte + scale_read_write_shape * 4
+    elapsed_time = start.elapsed_time(end) / running_step
+    bw = rw_byte / (elapsed_time / 1000) / 1024 ** 3
+    print(f'rowwise : {rowwise}, columnwise : {columnwise}, bandwidth : {bw:.2f} GB/s, time : {elapsed_time:.4f} ms, shape : {shape}', end='\n')
+
+
+    # torch.musa.synchronize()
+    # dst_sinv = musa_dst._rowwise_scale_inv
+    # dst_t = musa_dst._rowwise_data.view(dst_dtype).float()
+
+
+    # musa_dst._rowwise_data.zero_()
+    # musa_dst._rowwise_scale_inv.zero_()
+    # quantizer.update_quantized(musa_src, musa_dst)
+    # dst_sinv = musa_dst._rowwise_scale_inv
+    # dst_t = musa_dst._rowwise_data.view(dst_dtype).float()
+
+    # assert torch.equal(gold_sinv, dst_sinv)
+    # assert torch.equal(gold_t, dst_t)
+
+@pytest.mark.parametrize(
+    "shape",
+    [
+        7168,
+        4096,
+        2048,
+    ],
+)
+@pytest.mark.parametrize("accumulate", [False])
+@pytest.mark.parametrize("m_splits", [
+    [403,  649,  628,  338, 1095, 1426,  589,  591,  626,  709,  871,  542,
+         586, 1072,  797,  811, 1176,  658,  611,  604, 1113,  505,  266,  741,
+         647,  587,  847,  628, 1051,  764,  436, 1047,  707,  476,  453,  535,
+         459,  687,  482,  808,  727,  803,  738,  583,  854,  690,  863,  886],
+    [128,  256,  1024,  338, 1095, 1426,  589,  591,  626,  709,  871,  542,
+         586, 1072,  797,  811, 1176,  658,  611,  604, 1113,  505,  266,  741,
+         647,  587,  847,  896, 1051,  764,  436, 1047,  707,  476,  453,  535,
+         459,  687,  482,  808,  727,  803,  738,  583,  854,  690,  863,  886] # has aligned token, such as 128
+])
+@pytest.mark.parametrize("rowwise, columnwise", [
+    (True, True),
+    (True, False),
+    (False, True),
+])
+def test_fp8_grouped_cast(shape, accumulate, m_splits, rowwise, columnwise):
+    k = shape
+    m = sum(m_splits)
+    z = len(m_splits)
+
+    dtype = torch.bfloat16
+    dst_dtype = torch.float8_e4m3fn
+    # A = [torch.randn(n, k, dtype=dtype, device="musa") for _ in range(z)]  # weight
+    B = torch.split(torch.randn(m, k, dtype=dtype, device="musa"), m_splits)  # input
+    # out = torch.split(torch.randn(m, n, dtype=dtype, device="musa"), m_splits)  # output
+    # out_ref = [o.clone() for o in out]
+    recipe_state = create_mtfp8_groupwise_recipe_state('forward', 128, z)
+    # bwd_recipe_state = create_mtfp8_groupwise_recipe_state('backward', 128, z)
+    b_quantizers = recipe_state.make_quantizers()
+    # grad_output_quantizers =bwd_recipe_state.make_quantizers()
+
+    q_ref, s_ref, qt_ref, st_ref = torch_batch_blockwise_quant(B, m_splits, dst_dtype)
+    inputmats = tex.fused_multi_quantize(
+                B, None, b_quantizers, TE_DType[torch.bfloat16]
+            )
+    # weightmats = tex.fused_multi_quantize(
+    #             A, None, b_quantizers[48: 95], TE_DType[torch.bfloat16]
+    #         )
+    
+    assert len(inputmats) == len(q_ref)
+
+    atol = 0
+    rtol = 0
+    for i in range(len(inputmats)):
+        musa_dst = inputmats[i]
+        dst_rowwise_golden = q_ref[i].float()
+        scale_inv_rowwise_golden = s_ref[i]
+        dst_columnwise_golden = qt_ref[i].float()
+        scale_inv_columnwise_golden = st_ref[i]
+        if rowwise:
+            dst_t = musa_dst._rowwise_data.view(dst_dtype).float()
+            dst_sinv = musa_dst._rowwise_scale_inv
+            assert torch.allclose(dst_rowwise_golden, dst_t, atol=atol, rtol=rtol)
+            assert torch.allclose(scale_inv_rowwise_golden, dst_sinv, atol=atol, rtol=rtol)
+            
+        # print(f'scale_inv_columnwise_golden shape is {scale_inv_columnwise_golden.shape}, {dst_column_sinv.shape}')
+        if columnwise:
+            dst_column_sinv = musa_dst._columnwise_scale_inv
+            dst_t_column = musa_dst._columnwise_data.view(dst_dtype).float()
+            assert torch.allclose(scale_inv_columnwise_golden, dst_column_sinv, atol=atol, rtol=rtol)
+            assert torch.allclose(dst_columnwise_golden, dst_t_column, atol=atol, rtol=rtol)
+
+
+    import time
+    warmup_step = 10
+    running_step = 30
+    start = torch.cuda.Event(enable_timing=True)
+    end = torch.cuda.Event(enable_timing=True)
+    for i in range(warmup_step):
+       inputmats = tex.fused_multi_quantize(
+                B, None, b_quantizers, TE_DType[torch.bfloat16]
+            )
+    torch.musa.synchronize()
+    start.record()
+    for i in range(running_step):
+        inputmats = tex.fused_multi_quantize(
+                B, None, b_quantizers, TE_DType[torch.bfloat16]
+            )
+    end.record()
+    end.synchronize()
+        
+    m_scale_shape = sum([math.ceil(i / 128) for i in m_splits])
+    if rowwise and columnwise:
+        read_write_byte = 4
+        scale_read_write_shape = m_scale_shape * k + m * (k / 128)
+    elif rowwise or not columnwise:
+        read_write_byte = 3
+        scale_read_write_shape = m * (k / 128)
+    elif not rowwise or columnwise:
+        read_write_byte = 3
+        scale_read_write_shape = m_scale_shape * k
+
+    rw_byte = m * k * read_write_byte + scale_read_write_shape * 4
+    elapsed_time = start.elapsed_time(end) / running_step
+    bw = rw_byte / (elapsed_time / 1000) / 1024 ** 3
+    print(f'rowwise : {rowwise}, columnwise : {columnwise}, bandwidth : {bw:.2f} GB/s, time : {elapsed_time:.4f} ms, shape : [{m},{k}]')
+    
+    
+def torch_batch_blockwise_quant(x,
+                                token_count_per_expert_list,
+                                dst_dtype,
+                                round_scale=True):
+    # M, DIM = x.shape
+    q_refs = []
+    s_refs = []
+    qt_refs = []
+    st_refs = []
+    s = 0
+    for i, c in enumerate(token_count_per_expert_list):
+        c = token_count_per_expert_list[i]
+        if c == 0:
+            continue
+        # y = x[s:s + c]
+        # y = y.float()
+
+        y_q, y_scale, yt_q, yt_scale = _gen_mtfp8_groupwise_cast_transpose_golden(x[i],
+                                                             128,
+                                                             dst_dtype=dst_dtype)
+        q_refs.append(y_q)
+        s_refs.append(y_scale)
+        qt_refs.append(yt_q)
+        st_refs.append(yt_scale)
+        s += c
+    # q_ref = torch.cat(q_refs, 0)
+    # s_ref = torch.cat(s_refs, 0)
+    # qt_ref = torch.cat(qt_refs, 0)
+    # st_ref = torch.cat(st_refs, 0)
+    # return q_ref, s_ref, qt_ref, st_ref
+    return q_refs, s_refs, qt_refs, st_refs

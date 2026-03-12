@@ -150,13 +150,8 @@ class _Linear(torch.autograd.Function):
             else:
                 input_quantizer.set_usage(
                     rowwise=True,
-                    columnwise=backward_needs_input,
+                    columnwise=backward_needs_input and not save_original_input,
                 )
-                
-                # HACK:(Xiaoteng.Cui) To ensure casted output tensor's precision, MTFP8Quantizer needs both rowwise and columnwise usage set as a temporary workaround.
-                from ...musa.pytorch.tensor.mtfp8_tensor import MTFP8Quantizer
-                if isinstance(input_quantizer, MTFP8Quantizer):
-                    input_quantizer.set_usage(rowwise=True, columnwise=True)
                     
                 if not isinstance(inputmat, QuantizedTensor):
                     inputmat = input_quantizer(inputmat)
@@ -450,8 +445,7 @@ class _Linear(torch.autograd.Function):
                                 columnwise=not ctx.backward_input_needs_gather,
                             )
                         else:
-                            quantizer.set_usage(rowwise=True, columnwise=True) 
-                            # HACK (Xiaoteng.Cui): In fact, rowwise should be False here, but MTFP8Quantizer will raise NVTECHECK error.
+                            quantizer.set_usage(rowwise=False, columnwise=True)
                         inputmat = quantizer(inputmat)
                 else:
                     if input_is_quantized:

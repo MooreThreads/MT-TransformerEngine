@@ -6,7 +6,8 @@
 namespace transformer_engine {
 
 void mtfp8_cast_transpose(const Tensor* input, const Tensor* noop, Tensor* output_, musaStream_t stream);
-
+void mtfp8_rowwise_cast(const Tensor* input, const Tensor* noop, Tensor* output_, musaStream_t stream);
+void mtfp8_columnwise_cast(const Tensor* input, const Tensor* noop, Tensor* output_, musaStream_t stream);
 } // namespace transformer_engine
 
 #endif // TRANSFORMER_ENGINE_MUSA_COMMON_UTIL_MTFP8_CAST_TRANSPOSE_MUH_
