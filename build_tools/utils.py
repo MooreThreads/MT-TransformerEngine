@@ -162,27 +162,54 @@ def found_pybind11() -> bool:
 
 
 @functools.lru_cache(maxsize=None)
+def musa_path() -> Tuple[str, str]:
+    """MUSA root path and MCC binary path as a tuple.
+
+    Throws FileNotFoundError if MCC is not found."""
+    mcc_bin: Optional[Path] = None
+    if mcc_bin is None and os.getenv("MUSA_HOME"):
+        musa_home = Path(os.getenv("MUSA_HOME"))
+        mcc_bin = musa_home / "bin" / "mcc"
+    if mcc_bin is None:
+        mcc_bin = shutil.which("mcc")
+        if mcc_bin is not None:
+            musa_home = Path(mcc_bin.rstrip("/bin/mcc"))
+            mcc_bin = Path(mcc_bin)
+    if mcc_bin is None:
+        musa_home = Path("/usr/local/musa")
+        mcc_bin = musa_home / "bin" / "mcc"
+    if not mcc_bin.is_file():
+        raise FileNotFoundError(f"Could not find MCC at {mcc_bin}")
+
+    return musa_home, mcc_bin
+
+
+@functools.lru_cache(maxsize=None)
 def cuda_path() -> Tuple[str, str]:
     """CUDA root path and NVCC binary path as a tuple.
 
     Throws FileNotFoundError if NVCC is not found."""
-    # Try finding NVCC
+    # Try finding compiler
+    frameworks = get_frameworks()
+    if "musa" in frameworks:
+        return musa_path()
+ 
     nvcc_bin: Optional[Path] = None
     if nvcc_bin is None and os.getenv("CUDA_HOME"):
         # Check in CUDA_HOME
         cuda_home = Path(os.getenv("CUDA_HOME"))
         nvcc_bin = cuda_home / "bin" / "nvcc"
     if nvcc_bin is None:
-        # Check if nvcc is in path
         nvcc_bin = shutil.which("nvcc")
         if nvcc_bin is not None:
             cuda_home = Path(nvcc_bin.rstrip("/bin/nvcc"))
             nvcc_bin = Path(nvcc_bin)
     if nvcc_bin is None:
-        # Last-ditch guess in /usr/local/cuda
+        # Check if nvcc is in path
         cuda_home = Path("/usr/local/cuda")
         nvcc_bin = cuda_home / "bin" / "nvcc"
     if not nvcc_bin.is_file():
+        # Last-ditch guess in /usr/local/cuda
         raise FileNotFoundError(f"Could not find NVCC at {nvcc_bin}")
 
     return cuda_home, nvcc_bin

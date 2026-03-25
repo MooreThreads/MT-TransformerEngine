@@ -26,6 +26,14 @@
 #include "./util/musa_driver.h"
 #include "./util/logging.h"
 
+#if !defined(__MUSACC__)
+struct __half {
+  unsigned short __x;
+};
+struct __half_raw {
+  unsigned short x;
+};
+#endif
 namespace transformer_engine {
 
 inline size_t product(const std::vector<size_t> &shape, const size_t begin, const size_t end) {

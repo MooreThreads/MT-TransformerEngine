@@ -24,6 +24,7 @@ from .utils import (
     found_ninja,
     get_frameworks,
     cuda_path,
+    musa_path,
     get_max_jobs_for_parallel_build,
 )
 
@@ -157,22 +158,34 @@ def get_build_ext(extension_cls: Type[setuptools.Extension]):
                     # Copy before we make any modifications.
                     cflags = copy.deepcopy(extra_postargs)
                     original_compiler = self.compiler.compiler_so
+                    frameworks = get_frameworks()
                     try:
-                        _, nvcc_bin = cuda_path()
+                        if "musa" in frameworks:
+                            _, mcc_bin = musa_path()
+                            gpu_compiler_bin = mcc_bin
+                            gpu_exts = [".mu", ".muh"]
+                        else:
+                            _, gpu_compiler_bin = cuda_path()
+                            gpu_exts = [".cu", ".cuh"]
+
                         original_compiler = self.compiler.compiler_so
 
-                        if os.path.splitext(src)[1] in [".cu", ".cuh"]:
-                            self.compiler.set_executable("compiler_so", str(nvcc_bin))
+                        if os.path.splitext(src)[1] in gpu_exts:
+                            self.compiler.set_executable("compiler_so", str(gpu_compiler_bin))
                             if isinstance(cflags, dict):
-                                cflags = cflags["nvcc"]
+                                cflags = cflags.get("nvcc", cflags.get("mcc", []))
 
                             # Add -fPIC if not already specified
-                            if not any("-fPIC" in flag for flag in cflags):
-                                cflags.extend(["--compiler-options", "'-fPIC'"])
 
-                            # Forward unknown options
-                            if not any("--forward-unknown-opts" in flag for flag in cflags):
-                                cflags.append("--forward-unknown-opts")
+                            if "musa" in frameworks:
+                                if not any("-fPIC" in flag for flag in cflags):
+                                    cflags.extend(["-Xcompiler", "-fPIC"])
+                            else:
+                                if not any("-fPIC" in flag for flag in cflags):
+                                    cflags.extend(["--compiler-options", "'-fPIC'"])
+                                # Forward unknown options
+                                if not any("--forward-unknown-opts" in flag for flag in cflags):
+                                    cflags.append("--forward-unknown-opts")
 
                         elif isinstance(cflags, dict):
                             cflags = cflags["cxx"]
@@ -184,7 +197,7 @@ def get_build_ext(extension_cls: Type[setuptools.Extension]):
                         return original_compile_fn(obj, src, ext, cc_args, cflags, pp_opts)
 
                     finally:
-                        # Put the original compiler back in place.
+                         # Put the original compiler back in place.
                         self.compiler.set_executable("compiler_so", original_compiler)
 
                 self.compiler._compile = _compile_fn

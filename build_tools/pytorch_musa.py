@@ -43,7 +43,6 @@ def setup_pytorch_extension(
         "-std=c++17",
         "-Wno-reorder",
         "-march=native",
-        "force_mcc",
     ]
     mcc_flags = [
         "-O3",
