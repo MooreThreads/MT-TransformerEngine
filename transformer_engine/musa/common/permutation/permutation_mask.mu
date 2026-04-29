@@ -4,6 +4,12 @@
 #include "../util/mtfp8_utils.muh"
 #include "../utils.muh"
 
+namespace {
+
+using  v2i32_t = int32_t __attribute__((vector_size(8)));
+
+}
+
 // HACK(sherry): support fp32/fp64 router
 // input: [num_tokens, hidden_size] @ [stride_input_token, stride_input_hidden]
 // row_id_map: [num_experts, num_tokens]
@@ -17,7 +23,7 @@ __global__ void permute_with_mask_map_trans(
     const int num_tokens, const int num_experts, const int hidden_size,
     const int stride_input_token, const int stride_input_hidden, const int stride_output_token,
     const int stride_output_hidden, const int stride_probs_token, const int stride_probs_expert,
-    const int stride_permuted_probs_token) {
+    const int stride_permuted_probs_token, const v2i32_t ld_st_token_dim) {
   using IdxVec = transformer_engine::Vec<IdxDtype, 4>;
   int tidx = threadIdx.x;
   int token_id = blockIdx.x;
@@ -29,9 +35,9 @@ __global__ void permute_with_mask_map_trans(
   bar.init_arrival(1);
   __syncthreads();
 
-  int ld_dim = hidden_size;
-  int ld_pos = token_id * hidden_size;
-  __musa::memcpy_async(bar, smem, &in_dev_tensorDesc, ld_dim, ld_pos, trans_count, 0, 3, 1);
+  v2i32_t ld_pos{0, static_cast<int>(token_id)};
+  __musa::memcpy_async(bar, smem, &in_dev_tensorDesc, ld_st_token_dim, ld_pos, trans_count, 0, 3, 1);
+
   unsigned phase_id = bar.arrive();
   bar.wait(phase_id);
 
@@ -39,9 +45,8 @@ __global__ void permute_with_mask_map_trans(
   for (int expert_id = 0; expert_id < num_experts; expert_id += 1) {
     dst_row = row_id_map_ptr[expert_id * num_tokens + token_id];
     if (dst_row != -1) {
-      int st_dim = hidden_size;
-      int st_pos = dst_row * hidden_size;
-      __musa::memcpy(smem, &out_dev_tensorDesc, st_dim, st_pos);
+      v2i32_t st_pos{0, static_cast<int>(dst_row)};
+      __musa::memcpy(smem, &out_dev_tensorDesc, ld_st_token_dim, st_pos);
       if constexpr (with_permuted_probs) {
         if (tidx == 0) {
           int prob_offset = token_id * stride_probs_token + expert_id * stride_probs_expert;
@@ -64,7 +69,7 @@ __global__ void permute_with_mask_map(MUtensorDescriptor out_dev_tensorDesc,
                                       const int stride_input_token, const int stride_input_hidden,
                                       const int stride_output_token, const int stride_output_hidden,
                                       const int stride_probs_token, const int stride_probs_expert,
-                                      const int stride_permuted_probs_token) {
+                                      const int stride_permuted_probs_token, const v2i32_t ld_st_token_dim) {
   using IdxVec = transformer_engine::Vec<IdxDtype, 4>;
   int tidx = threadIdx.x;
   int token_id = blockIdx.x;
@@ -82,27 +87,29 @@ __global__ void permute_with_mask_map(MUtensorDescriptor out_dev_tensorDesc,
   bar_map.init_arrival(1);
   __syncthreads();
 
-  int ld_dim = hidden_size;
-  int ld_pos = token_id * hidden_size;
   int ld_dim_map = num_experts;
   int ld_pos_map = token_id * num_experts;
   __musa::memcpy_async(bar_map, smem_map, &map_dev_tensorDesc, ld_dim_map, ld_pos_map,
                        trans_count_map, 0, 3, 1);
   unsigned phase_id_map = bar_map.arrive();
-  __musa::memcpy_async(bar, smem, &in_dev_tensorDesc, ld_dim, ld_pos, trans_count, 0, 3, 1);
+
+  v2i32_t ld_pos{0, static_cast<int>(token_id)};
+  __musa::memcpy_async(bar, smem, &in_dev_tensorDesc, ld_st_token_dim, ld_pos, trans_count, 0, 3, 1);
   unsigned phase_id = bar.arrive();
 
   bar_map.wait(phase_id_map);
   bar.wait(phase_id);
+
   IdxVec dst_row_vec;
   for (int expert_id = 0; expert_id < num_experts; expert_id += 4) {
     dst_row_vec.load_from(smem_map + expert_id);
 #pragma unroll
     for (int i = 0; i < 4; i++) {
       if (dst_row_vec.data.elt[i] != -1) {
-        int st_dim = hidden_size;
-        int st_pos = dst_row_vec.data.elt[i] * hidden_size;
-        __musa::memcpy(smem, &out_dev_tensorDesc, st_dim, st_pos);
+
+        v2i32_t st_pos{0, static_cast<int>(dst_row_vec.data.elt[i])};
+        __musa::memcpy(smem, &out_dev_tensorDesc, ld_st_token_dim, st_pos);
+
         if constexpr (with_permuted_probs) {
           if (tidx == 0) {
             int prob_offset = token_id * stride_probs_token + (expert_id + i) * stride_probs_expert;
@@ -324,33 +331,38 @@ void nvte_permute_mask_launcher(const Dtype *input, Dtype *output, IdxDtype *row
     NVTE_CHECK((num_experts * sizeof(IdxDtype)) % 4 == 0,
                "bytes of num_experts must be divisible by 4");
   }
+  constexpr int data_size = sizeof(Dtype);
 
   MUtensorDescriptor intensorDesc;
   MUtensorDescriptor outtensorDesc;
   MUtensorDescriptor maptensorDesc;
   MUtensorDescriptorDataType tensorDataType = MU_TENSOR_DESCRIPTOR_DATA_TYPE_BFLOAT16;
   MUtensorDescriptorDataType mapDataType = MU_TENSOR_DESCRIPTOR_DATA_TYPE_INT64;
-  uint32_t tensorRank = 1;
-  const uint64_t in_globalDim[5] = {static_cast<uint64_t>(hidden_size) * num_tokens, 1, 1, 1, 1};
-  const uint64_t in_globalStrides[4] = {0, 0, 0, 0};
-  const uint64_t out_globalDim[5] = {static_cast<uint64_t>(hidden_size) * num_out_tokens, 1, 1, 1,
-                                     1};
-  const uint64_t out_globalStrides[4] = {0, 0, 0, 0};
-  const uint64_t map_globalDim[5] = {static_cast<uint64_t>(num_experts) * num_tokens, 1, 1, 1, 1};
-  const uint64_t map_globalStrides[4] = {0, 0, 0, 0};
   MUtensorDescriptorInterleave interleave = MU_TENSOR_DESCRIPTOR_INTERLEAVE_NONE;
   uint64_t oobConstantFill = 0;
-  
-  transformer_engine::checkCuDriverContext(stream);
-  NVTE_CHECK_MU(muTensorDescriptorEncode(&intensorDesc, tensorDataType, tensorRank, (void *)input,
-                                         in_globalDim, in_globalStrides, interleave,
-                                         oobConstantFill));
-  NVTE_CHECK_MU(muTensorDescriptorEncode(&outtensorDesc, tensorDataType, tensorRank, (void *)output,
-                                         out_globalDim, out_globalStrides, interleave,
-                                         oobConstantFill));
+
+  uint32_t tensorRank = 1;
+  const uint64_t map_globalDim[5] = {static_cast<uint64_t>(num_experts) * num_tokens, 1, 1, 1, 1};
+  const uint64_t map_globalStrides[4] = {0, 0, 0, 0};
   NVTE_CHECK_MU(muTensorDescriptorEncode(&maptensorDesc, mapDataType, tensorRank,
                                          (void *)row_id_map, map_globalDim, map_globalStrides,
                                          interleave, oobConstantFill));
+
+  uint32_t tensorRankIn = 2;
+  const uint64_t in_globalDim[5] = {static_cast<uint64_t>(hidden_size), static_cast<uint64_t>(num_tokens), 1, 1, 1};
+  const uint64_t in_globalStrides[4] = {static_cast<uint64_t>(hidden_size)*data_size, 0, 0, 0};
+  NVTE_CHECK_MU(muTensorDescriptorEncode(&intensorDesc, tensorDataType, tensorRankIn, (void *)input,
+                                         in_globalDim, in_globalStrides, interleave,
+                                         oobConstantFill));
+
+  uint32_t tensorRankOut = 2;
+  const uint64_t out_globalDim[5] = {static_cast<uint64_t>(hidden_size), static_cast<uint64_t>(num_out_tokens), 1, 1, 1};
+  const uint64_t out_globalStrides[4] = {static_cast<uint64_t>(hidden_size)*data_size, 0, 0, 0};
+  NVTE_CHECK_MU(muTensorDescriptorEncode(&outtensorDesc, tensorDataType, tensorRankOut, (void *)output,
+                                         out_globalDim, out_globalStrides, interleave,
+                                         oobConstantFill));
+
+  const v2i32_t ld_st_token_dim{hidden_size, 1};
 
   const int block_x = 32;
   const int grid_x = num_tokens;
@@ -361,12 +373,12 @@ void nvte_permute_mask_launcher(const Dtype *input, Dtype *output, IdxDtype *row
     int smem_size = hidden_size * sizeof(Dtype);
     permute_with_mask_map_trans<Dtype, P_Dtype, IdxDtype, with_permuted_probs><<<grid, block, smem_size, stream>>>(
         outtensorDesc, intensorDesc, row_id_map, probs, permuted_probs, num_tokens, num_experts,
-        hidden_size, hidden_size, 1, hidden_size, 1, num_experts, 1, 1);
+        hidden_size, hidden_size, 1, hidden_size, 1, num_experts, 1, 1, ld_st_token_dim);
   } else {
     int smem_size = hidden_size * sizeof(Dtype) + num_experts * sizeof(IdxDtype);
     permute_with_mask_map<Dtype, P_Dtype, IdxDtype, with_permuted_probs><<<grid, block, smem_size, stream>>>(
         outtensorDesc, intensorDesc, maptensorDesc, probs, permuted_probs, num_tokens, num_experts,
-        hidden_size, hidden_size, 1, hidden_size, 1, num_experts, 1, 1);
+        hidden_size, hidden_size, 1, hidden_size, 1, num_experts, 1, 1, ld_st_token_dim);
   }
 }
 
