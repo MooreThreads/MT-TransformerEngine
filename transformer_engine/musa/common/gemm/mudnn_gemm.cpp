@@ -404,7 +404,10 @@ void nvte_grouped_mudnn_gemm(
   std::vector<at::musa::muTensor> inputR(num_gemms);
   std::vector<at::musa::muTensor> inputBias(num_gemms);
   std::vector<at::musa::muTensor> inputOut(num_gemms);
-  NVTE_CHECK(num_gemms >= 0, "The input of B mustn't be empty.");
+  NVTE_CHECK(num_gemms >= 0, "The number of grouped GEMMs must be non-negative.");
+  if (num_gemms == 0) {
+    return;
+  }
   std::vector<::musa::dnn::MatMulLtParam> lt_parap_vec(num_gemms);
   const auto B_type = reinterpret_cast<const Tensor*>(B[0])->dtype();
   bool with_bias = false;
