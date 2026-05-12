@@ -86,7 +86,7 @@ class _GroupedLinear(torch.autograd.Function):
         # pylint: disable=missing-function-docstring
 
         # collect max token num on this device
-        from mem_utils import MemMonitor
+        from musa_patch.mem_utils import MemMonitor
         MemMonitor.max_token_num = max(MemMonitor.max_token_num, inp.numel() // inp.shape[-1])
         
         num_gemms = len(m_splits)
