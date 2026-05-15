@@ -100,6 +100,9 @@ list(APPEND transformer_engine_SOURCES
   comm_gemm_overlap/userbuffers/userbuffers.mu
   fused_attn/fused_attn.cpp
   fused_attn/thd_utils.mu
+  fused_router/fused_moe_aux_loss.mu
+  fused_router/fused_score_for_moe_aux_loss.mu
+  fused_router/fused_topk_with_score_function.mu
   fused_rope/fused_rope.mu
   fused_softmax/scaled_aligned_causal_masked_softmax.mu
   fused_softmax/scaled_masked_softmax.mu

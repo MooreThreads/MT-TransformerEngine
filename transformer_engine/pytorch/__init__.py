@@ -81,6 +81,11 @@ from transformer_engine.pytorch.permutation import (
     moe_sort_chunks_by_index,
     moe_sort_chunks_by_index_with_probs,
 )
+from transformer_engine.pytorch.router import (
+    fused_topk_with_score_function,
+    fused_compute_score_for_moe_aux_loss,
+    fused_moe_aux_loss,
+)
 from transformer_engine.pytorch.fp8 import fp8_autocast
 from transformer_engine.pytorch.fp8 import fp8_model_init
 from transformer_engine.pytorch.graph import make_graphed_callables
