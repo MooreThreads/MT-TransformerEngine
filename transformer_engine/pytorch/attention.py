@@ -446,7 +446,11 @@ def get_attention_backend(
         logger.debug("Disabling UnfusedDotProductAttention due to NVTE_UNFUSED_ATTN=0")
 
     # Filter: Compute capability
-    if device_compute_capability < (8, 0):
+    # NOTE(MUSA): MUSA GPUs report a non-NVIDIA compute capability (e.g. (3, 1) for
+    # mp_31) that is not comparable to NVIDIA sm versions. Skip this sm80+ filter on
+    # MUSA so FlashAttention / FusedAttention are not wrongly disabled.
+    _is_musa = hasattr(torch, "musa") and torch.musa.is_available()
+    if not _is_musa and device_compute_capability < (8, 0):
         if use_flash_attention and _flash_attn_is_installed:
             logger.debug("Disabling FlashAttention as it requires compute capability sm80+")
         use_flash_attention = False

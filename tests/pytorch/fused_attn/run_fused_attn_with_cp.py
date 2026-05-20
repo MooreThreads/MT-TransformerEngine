@@ -61,12 +61,12 @@ def run_dpa_with_cp(
 
     print(f"[INFO] world_size:{world_size}, rank:{rank}")
 
-    dist.init_process_group(backend="nccl", world_size=world_size, rank=rank)
+    dist.init_process_group(backend="mccl", world_size=world_size, rank=rank)
 
     # create flash attn comm group for CP
     cp_comm_ranks = range(world_size)
     assert rank in cp_comm_ranks
-    cp_comm_group = dist.new_group(cp_comm_ranks, backend="nccl")
+    cp_comm_group = dist.new_group(cp_comm_ranks, backend="mccl")
     if cp_comm_type == "a2a+p2p":
         assert (
             world_size % 2 == 0
@@ -75,7 +75,7 @@ def run_dpa_with_cp(
         cp_comm_sub_ranks += [range(i, world_size, 2) for i in range(2)]
         cp_comm_sub_groups = []
         for sub_ranks in cp_comm_sub_ranks:
-            sub_group = dist.new_group(sub_ranks, backend="nccl")
+            sub_group = dist.new_group(sub_ranks, backend="mccl")
             if rank in sub_ranks:
                 cp_comm_sub_groups.append(sub_group)
 

@@ -52,7 +52,9 @@ def get_bash_arguments(num_gpus_per_node, **kwargs):
 
 
 @pytest.mark.skipif(not _flash_attn_2_plus, reason="Flash-attn 2.0+ is required.")
-@pytest.mark.skipif(get_device_compute_capability() < (8, 0), reason="CP tests require sm80+.")
+# NOTE(MUSA): get_device_compute_capability() returns (3, 1) for mp_31, which is not
+# comparable to NVIDIA sm versions. Skip check disabled so the test runs on MUSA.
+# @pytest.mark.skipif(get_device_compute_capability() < (8, 0), reason="CP tests require sm80+.")
 @pytest.mark.parametrize("dtype", ["bf16", "fp16"])
 @pytest.mark.parametrize("model", model_configs_flash_attn.keys())
 @pytest.mark.parametrize("qkv_format", ["bshd", "sbhd", "thd"])
@@ -67,6 +69,10 @@ def test_cp_with_flash_attention(dtype, model, qkv_format, cp_comm_type):
         pytest.skip("CP implementation with KV all-gather does not support bias yet!")
     if "a2a" in cp_comm_type and qkv_format == "thd":
         pytest.skip("CP implementation with QKVO A2A does not support THD format yet!")
+    # NOTE(MUSA): the MUSA flash attention op (_scaled_dot_product_attention_flash_musa)
+    # does not support sliding window attention yet.
+    if "a2a" in cp_comm_type and config.window_size != (-1, 0) and config.window_size != (-1, -1):
+        pytest.skip("MUSA flash attention does not support sliding window with QKVO A2A yet!")
     if "a2a" in cp_comm_type and config.attn_bias_type != "no_bias":
         pytest.skip("CP implementation with QKVO A2A does not support bias yet!")
     if "a2a" in cp_comm_type and (config.num_heads % 2 != 0 or config.num_gqa_groups % 2 != 0):
@@ -107,8 +113,11 @@ model_configs_fused_attn = {
 }
 
 
-@pytest.mark.skipif(get_cudnn_version() < (8, 9, 7), reason="cuDNN 8.9.7+ is required.")
-@pytest.mark.skipif(get_device_compute_capability() < (8, 0), reason="CP tests require sm80+.")
+# NOTE(MUSA): get_cudnn_version() returns the mudnn version (e.g. (3, 1, 7)) and
+# get_device_compute_capability() returns (3, 1) for mp_31 -- neither is comparable
+# to NVIDIA cuDNN / sm versions. Skip checks disabled so the test runs on MUSA.
+# @pytest.mark.skipif(get_cudnn_version() < (8, 9, 7), reason="cuDNN 8.9.7+ is required.")
+# @pytest.mark.skipif(get_device_compute_capability() < (8, 0), reason="CP tests require sm80+.")
 @pytest.mark.parametrize("dtype", ["bf16", "fp16", "fp8"])
 @pytest.mark.parametrize("model", model_configs_fused_attn.keys())
 @pytest.mark.parametrize("qkv_format", ["bshd", "sbhd", "thd"])
