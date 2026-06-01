@@ -172,12 +172,6 @@ def patch_after_import_torch():
         return False
     torch.is_autocast_enabled = is_autocast_enabled
 
-    import os
-    #HACK(sherry): enable torch.compile
-    os.environ["NVTE_TORCH_COMPILE"] = "0"
-    os.environ["TORCHDYNAMO_DISABLE"] = "1"
-    #HACK(sherry)
-
 def py_patch():
     if sys.version_info >= (3.9, 0):
         return
