@@ -628,6 +628,8 @@ def _sort_chunks_by_idxs_kernel(
     tl.store(dst_rows_ptr + pid, dst_row)
 
     current_start = 0
+    pid = pid.to(tl.int64)
+    dst_row = dst_row.to(tl.int64)
     while current_start < hidden_size:
         current_offset = current_start + tl.arange(0, BLOCK_SIZE)
         mask = current_offset < hidden_size
@@ -734,6 +736,8 @@ def _sort_chunks_by_map_kernel(
     pid = tl.program_id(0)
     dst_row = tl.load(row_id_map_ptr + pid)
     current_start = 0
+    pid = pid.to(tl.int64)
+    dst_row = dst_row.to(tl.int64)
     while current_start < hidden_size:
         current_offset = current_start + tl.arange(0, BLOCK_SIZE)
         mask = current_offset < hidden_size
