@@ -8,8 +8,8 @@ from transformer_engine.pytorch.distributed import (
     is_fp8_activation_recompute_enabled,
     in_fp8_activation_recompute_phase,
 )
-from ..utils import wrap_attr, replace_attr
-
+from ..utils import wrap_attr, replace_attr, add_attr
+from transformer_engine.pytorch.module._common import noop_cat
 
 def musa_set_meta_tensor(self, fwd: bool, recipe: Recipe) -> None:
     fp8_meta_tensor_key = "scaling_fwd" if fwd else "scaling_bwd"
@@ -74,9 +74,33 @@ def TransformerEngineBaseModule_prepare_forward(
             FP8GlobalStateManager.restore_fp8_meta_tensors(self.fp8_meta, self.quantizers)
 ##HACK(huang.huang)
 
+
+def TransformerEngineBaseModule_backward_dw(self):
+    """
+    Execute the delayed weight gradient computation.
+    This method is called after the main backward pass to compute weight gradients.
+    """
+    if self.wgrad_store is None or not self.wgrad_store.delay_wgrad_compute():
+        return
+    with torch.cuda.nvtx.range(f"_{self.__class__.__name__}_wgrad"):
+        (wgrad, grad_bias_, _, _), _ = self.wgrad_store.pop()
+        if not self.fuse_wgrad_accumulation:
+            unfused_weights = [getattr(self, name) for name in self.weight_names]
+            weight_tensor = noop_cat(unfused_weights)
+            if weight_tensor.grad is None:
+                weight_tensor.grad = wgrad.to(weight_tensor.dtype)
+        if self.use_bias:
+            bias_tensor = noop_cat([getattr(self, name) for name in self.bias_names])
+            if bias_tensor.grad is None:
+                bias_tensor.grad = grad_bias_.to(bias_tensor.dtype)
+        del grad_bias_
+        del wgrad
+
+
 def pytorch_module_base_workaround():
     from transformer_engine.pytorch.module.base import TransformerEngineBaseModule
     from transformer_engine.pytorch import fp8
     wrap_attr(TransformerEngineBaseModule, "set_meta_tensor", musa_set_meta_tensor)
     replace_attr(TransformerEngineBaseModule, "prepare_forward", TransformerEngineBaseModule_prepare_forward)
+    add_attr(TransformerEngineBaseModule, "backward_dw", TransformerEngineBaseModule_backward_dw)
 pytorch_module_base_workaround()

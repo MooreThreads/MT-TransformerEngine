@@ -8,6 +8,7 @@ from typing import Callable, Dict, Optional, Tuple, Union
 from functools import reduce
 from operator import mul as multiply_op
 
+import functools
 import torch
 
 import transformer_engine_torch as tex
@@ -20,7 +21,7 @@ from .base import (
     _2X_ACC_DGRAD,
     _2X_ACC_WGRAD,
 )
-from ._common import noop_cat, _fix_gathered_fp8_transpose
+from ._common import noop_cat, _fix_gathered_fp8_transpose, WeightGradStore
 from ..fp8 import FP8GlobalStateManager
 from ..utils import (
     divide,
@@ -76,6 +77,7 @@ class _Linear(torch.autograd.Function):
         is_first_microbatch: Union[bool, None],
         fp8: bool,
         fp8_calibration: bool,
+        wgrad_store: WeightGradStore,
         input_quantizer: Optional[Quantizer],
         weight_quantizer: Optional[Quantizer],
         output_quantizer: Optional[Quantizer],
@@ -313,6 +315,7 @@ class _Linear(torch.autograd.Function):
                 ctx.reduce_and_update_bwd_fp8_tensors = FP8GlobalStateManager.is_first_fp8_module()
                 if in_fp8_activation_recompute_phase():
                     FP8GlobalStateManager.IS_FIRST_FP8_MODULE = _first_fp8_module
+            ctx.wgrad_store = wgrad_store
 
         # Row Parallel Linear
         if ub_overlap_rs_fprop:
@@ -553,10 +556,9 @@ class _Linear(torch.autograd.Function):
 
                 # wgrad GEMM
                 # Note: Fuse with bgrad computation if needed
-                wgrad, grad_bias_, _, rs_out = ceg.general_gemm(
-                    inputmat_total,
-                    grad_output,
-                    get_workspace(),
+                general_gemm_wgrad = functools.partial(
+                    general_gemm,
+                    workspace=get_workspace(),
                     layout="NT",
                     grad=True,
                     out_dtype=(
@@ -572,20 +574,25 @@ class _Linear(torch.autograd.Function):
                     bulk_overlap=ctx.ub_bulk_wgrad,
                 )
 
+                if ctx.wgrad_store is not None and ctx.wgrad_store.delay_wgrad_compute():
+                    ctx.wgrad_store.put([inputmat_total, grad_output], general_gemm_wgrad)
+                else:
+                    wgrad, grad_bias_, _, rs_out = general_gemm_wgrad(inputmat_total, grad_output)
+
+                    if grad_bias is None:
+                        grad_bias = grad_bias_
+                    del grad_bias_
+
+                    # Deallocate input tensor
+                    if os.getenv("ENABLE_ZERO_BUBBLE", "0") == "0":
+                        if ctx.owns_input:
+                            clear_tensor_data(inputmat_total)
+
                 if ctx.ub_bulk_wgrad:
                     if ub_obj_wgrad.is_fp8_ubuf():
                         dgrad = rs_out
                     else:
                         dgrad = ub_obj_wgrad.get_buffer(ctx.grad_input_quantizer, local_chunk=True)
-
-                if grad_bias is None:
-                    grad_bias = grad_bias_
-                del grad_bias_
-
-                # # Deallocate input tensor
-                if os.getenv("ENABLE_ZERO_BUBBLE", "0") == "0":
-                    if ctx.owns_input:
-                        clear_tensor_data(inputmat_total)
 
             # Don't return grad bias if not needed
             if not ctx.use_bias:
@@ -634,6 +641,7 @@ class _Linear(torch.autograd.Function):
             None,  # is_first_microbatch
             None,  # fp8
             None,  # fp8_calibration
+            None,  # wgrad_store
             None,  # input_quantizer
             None,  # weight_quantizer
             None,  # output_quantizer
@@ -761,6 +769,7 @@ class Linear(TransformerEngineBaseModule):
         ub_bulk_dgrad: bool = False,
         ub_bulk_wgrad: bool = False,
         ub_name: Optional[str] = None,
+        delay_wgrad_compute: bool = False,
         save_original_input: bool = False,
     ) -> None:
         super().__init__()
@@ -775,6 +784,7 @@ class Linear(TransformerEngineBaseModule):
         self.get_rng_state_tracker = get_rng_state_tracker
         self.rng_tracker_name = rng_tracker_name
         self.save_original_input = save_original_input
+        self.wgrad_store = WeightGradStore(delay_wgrad_compute, ub_bulk_wgrad)
 
         if device == "meta":
             assert parameters_split is None, "Cannot split module parameters on 'meta' device."
@@ -1063,6 +1073,7 @@ class Linear(TransformerEngineBaseModule):
                 is_first_microbatch,
                 self.fp8,
                 self.fp8_calibration,
+                self.wgrad_store,
                 input_quantizer,
                 weight_quantizer,
                 output_quantizer,
