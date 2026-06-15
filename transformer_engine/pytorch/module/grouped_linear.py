@@ -213,7 +213,7 @@ class _GroupedLinear(torch.autograd.Function):
                                 rowwise_scale_inv_list.append(inputmat._rowwise_scale_inv)
 
                 fine_grained_offload_handler = get_fine_grained_offload_handler()
-                if fine_grained_offload and not fine_grained_offload_handler.is_last_2_pipeline_parallel_stage() and not fine_grained_offload_handler.is_last_batch_last_layer():
+                if fine_grained_offload and fine_grained_offload_handler.should_offload():
                     if isinstance(inputmats[0], torch.Tensor):
                         ctx.offload_dtype = None
                         fc1_input = inp
@@ -293,7 +293,7 @@ class _GroupedLinear(torch.autograd.Function):
                 biases = saved_tensors[2 * N : 3 * N]
             else:
                 fine_grained_offload_handler = get_fine_grained_offload_handler()
-                assert not fine_grained_offload_handler.is_last_2_pipeline_parallel_stage() and not fine_grained_offload_handler.is_last_batch_last_layer()
+                assert fine_grained_offload_handler.should_offload()
                 fc1_input = fine_grained_offload_handler.get_reloaded(ctx.tensor_tags)
                 inputmats = torch.split(fc1_input, ctx.m_splits)
                 if ctx.offload_dtype == "fp8_tensor":
