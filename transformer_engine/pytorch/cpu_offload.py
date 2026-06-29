@@ -654,6 +654,28 @@ class _FineGrainedAsyncDoubleBufferGroupOffloadHandler(OffloadHandler):
             torch.distributed.barrier()
             self.pin_memory_tensor_pool_released = False
     
+    def print_pin_memory_tensor_pool_memory_usage(self, tag=""):
+        import os
+        total_bytes = 0
+        for buffer in self.pin_memory_tensor_pool.values():
+            if buffer is not None:
+                total_bytes += buffer.untyped_storage().nbytes()
+
+        local_rank = os.getenv("LOCAL_RANK")
+        if local_rank is None and torch.distributed.is_available() and torch.distributed.is_initialized():
+            local_world_size = int(os.getenv("LOCAL_WORLD_SIZE", os.getenv("GPUS_PER_NODE", "8")))
+            local_rank = str(torch.distributed.get_rank() % local_world_size)
+        if local_rank is None:
+            local_rank = "unknown"
+
+        tag_text = f" tag={tag}" if tag else ""
+        print(
+            f"[cpu_act_offload_pinmem_pool] local_rank={local_rank}{tag_text} "
+            f"total_memory_gb={total_bytes / (1024 ** 3):.4f}",
+            flush=True,
+        )
+        return total_bytes
+    
     
     def is_last_2_pipeline_parallel_stage(self):
         return (self.pp_rank == (self.pp_size - 1)) or (self.pp_rank == (self.pp_size - 2))
@@ -904,7 +926,7 @@ class _FineGrainedAsyncDoubleBufferGroupOffloadHandler(OffloadHandler):
     def launch_reload(self, tensor_name, reloading_microbatch_id = None, reloading_layer_id = None):
         # print(f"[launch_reload] call with tensor_name:{tensor_name}, reloading_microbatch_id:{reloading_microbatch_id}, reloading_layer_id:{reloading_layer_id}")
         # print(f"[launch_reload] self.current_layer_id = {self.current_layer_id}")
-        if self.current_layer_id >= len(self.moe_layer_pattern) or self.moe_layer_pattern[self.current_layer_id] == 0:
+        if reloading_microbatch_id == None and (self.current_layer_id >= len(self.moe_layer_pattern) or self.moe_layer_pattern[self.current_layer_id] == 0):
             return
         
         if self.h2d_stream is None:
@@ -965,7 +987,7 @@ class _FineGrainedAsyncDoubleBufferGroupOffloadHandler(OffloadHandler):
 
     def wait_reload(self, tensor_name, reloading_microbatch_id = None, reloading_layer_id = None):
         # print(f"[wait_reload] current_layer_id={self.current_layer_id}")
-        if self.current_layer_id >= len(self.moe_layer_pattern) or self.moe_layer_pattern[self.current_layer_id] == 0:
+        if reloading_microbatch_id == None and (self.current_layer_id >= len(self.moe_layer_pattern) or self.moe_layer_pattern[self.current_layer_id] == 0):
             return
         
         if self.num_model_chunks == None:
