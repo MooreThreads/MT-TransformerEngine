@@ -860,7 +860,7 @@ class _FineGrainedAsyncDoubleBufferGroupOffloadHandler(OffloadHandler):
             existing_buffer = self.pin_memory_tensor_pool.get(pin_memory_tag)
             # existing_buffer = self.pin_memory_tensor_pool.get(tensor_tag)
             if existing_buffer is None or existing_buffer.size() < src_tensor.size():
-                buffer_shape = [math.ceil(token_num * 1.1)] + list(hidden_dim)
+                buffer_shape = [token_num] + list(hidden_dim)
                 new_buffer = torch.empty(
                     buffer_shape,
                     dtype=src_tensor.dtype,
@@ -1029,7 +1029,9 @@ class _FineGrainedAsyncDoubleBufferGroupOffloadHandler(OffloadHandler):
         # print(f"[SUCCES wait_reload] on tensor_tag (reloading_microbatch_id, reloading_layer_id, tensor_name): {tensor_tag}")
         (copy_done_event, device_tensor) = self.reloading_tensor[tensor_tag]
         copy_done_event.synchronize() # TODO: use .wait() to check the stream with copy engine (d2h / h2d / all2all)
-        pin_memory_id = self.tensor_tag_to_pin_memory_id[tensor_tag]
+        pin_memory_id = self.tensor_tag_to_pin_memory_id.pop(tensor_tag)
+        pin_memory_tag = (pin_memory_id, tensor_name)
+        self.pin_memory_tensor_pool.pop(pin_memory_tag, None)
         self.available_pin_memory_tensor_pool_id_queue_dict[tensor_name].put(pin_memory_id)
         return
     
