@@ -572,11 +572,7 @@ class _FineGrainedAsyncDoubleBufferGroupOffloadHandler(OffloadHandler):
         self.pp_size = None
         self.pp_rank = None
         self.num_microbatches = None
-        self.available_pin_memory_tensor_pool_id_queue_dict = {}
-        self.tensor_tag_to_pin_memory_id = {}
 
-        self.pin_memory_tensor_pool = {}
-        self.pin_memory_tensor_pool_metadata = {}
         self.pin_memory_tensor_pool_released = False
         
         self.moe_layer_pattern = []
@@ -605,29 +601,18 @@ class _FineGrainedAsyncDoubleBufferGroupOffloadHandler(OffloadHandler):
             
         import queue
         if config.offload_moe_fc1_input:
-            self.available_pin_memory_tensor_pool_id_queue_dict['moe_fc1_input'] = queue.Queue()
             self.to_offload_tensor_tag_queue_dict['moe_fc1_input'] = queue.Queue()
             self.to_offload_tensor_queue_dict['moe_fc1_input'] = queue.Queue()
             self.to_release_tensor_queue_dict['moe_fc1_input'] = queue.Queue()
         if config.offload_moe_fused_swiglu_input:
-            self.available_pin_memory_tensor_pool_id_queue_dict['moe_fused_swiglu_input'] = queue.Queue()
             self.to_offload_tensor_tag_queue_dict['moe_fused_swiglu_input'] = queue.Queue()
             self.to_offload_tensor_queue_dict['moe_fused_swiglu_input'] = queue.Queue()
             self.to_release_tensor_queue_dict['moe_fused_swiglu_input'] = queue.Queue()
 
+
     def release_cpu_pinmem_pool(self):
         torch.cuda.synchronize()
         self.tensor_tag_to_state.clear()
-
-        while self.pin_memory_tensor_pool:
-            key, buffer = self.pin_memory_tensor_pool.popitem()
-            self.pin_memory_tensor_pool_metadata[key] = (
-                buffer.shape, 
-                buffer.dtype,
-                buffer.layout)
-            import sys
-            del buffer
-        self.pin_memory_tensor_pool.clear()
         
         import gc
         gc.collect()
@@ -635,46 +620,6 @@ class _FineGrainedAsyncDoubleBufferGroupOffloadHandler(OffloadHandler):
         torch_musa._MUSAC._host_emptyCache()
         torch.distributed.barrier()
         self.pin_memory_tensor_pool_released = True
-    
-    
-    def maybe_resume_cpu_pinmem_pool(self):
-        torch.cuda.synchronize()
-        self.pin_memory_tensor_pool = {}
-        if self.pin_memory_tensor_pool_released:
-            torch.distributed.barrier()
-            for key in self.pin_memory_tensor_pool_metadata.keys():
-                metadata = self.pin_memory_tensor_pool_metadata[key]
-                self.pin_memory_tensor_pool[key] = torch.empty(
-                        metadata[0],
-                        dtype=metadata[1],
-                        layout=metadata[2],
-                        device="cpu",
-                        pin_memory=True,
-                    )
-            torch.distributed.barrier()
-            self.pin_memory_tensor_pool_released = False
-    
-    def print_pin_memory_tensor_pool_memory_usage(self, tag=""):
-        import os
-        total_bytes = 0
-        for buffer in self.pin_memory_tensor_pool.values():
-            if buffer is not None:
-                total_bytes += buffer.untyped_storage().nbytes()
-
-        local_rank = os.getenv("LOCAL_RANK")
-        if local_rank is None and torch.distributed.is_available() and torch.distributed.is_initialized():
-            local_world_size = int(os.getenv("LOCAL_WORLD_SIZE", os.getenv("GPUS_PER_NODE", "8")))
-            local_rank = str(torch.distributed.get_rank() % local_world_size)
-        if local_rank is None:
-            local_rank = "unknown"
-
-        tag_text = f" tag={tag}" if tag else ""
-        print(
-            f"[cpu_act_offload_pinmem_pool] local_rank={local_rank}{tag_text} "
-            f"total_memory_gb={total_bytes / (1024 ** 3):.4f}",
-            flush=True,
-        )
-        return total_bytes
     
     
     def is_last_2_pipeline_parallel_stage(self):
@@ -842,39 +787,23 @@ class _FineGrainedAsyncDoubleBufferGroupOffloadHandler(OffloadHandler):
         copy_done_event = torch.cuda.Event()
         # print(f"[SUCCES launch_offload] on tensor tag (offloading_microbatch_id, offloading_layer_id, tensor_name) : {tensor_tag}")
 
-        token_num = src_tensor.size(0)
-        hidden_dim = src_tensor.size()[1:]
+        # token_num = src_tensor.size(0)
+        # hidden_dim = src_tensor.size()[1:]
                 
         if not self.config.overlap_moe_expert_parallel_comm:
             self.d2h_stream.wait_stream(torch.cuda.current_stream())
         
-        if self.available_pin_memory_tensor_pool_id_queue_dict[tensor_name].empty():
-            pin_memory_id = len(self.pin_memory_tensor_pool)
-        else:
-            pin_memory_id = self.available_pin_memory_tensor_pool_id_queue_dict[tensor_name].get()
-            
-        pin_memory_tag = (pin_memory_id, tensor_name)
-        self.tensor_tag_to_pin_memory_id[tensor_tag] = pin_memory_id
-        
         with torch.cuda.stream(self.d2h_stream):
-            existing_buffer = self.pin_memory_tensor_pool.get(pin_memory_tag)
-            # existing_buffer = self.pin_memory_tensor_pool.get(tensor_tag)
-            if existing_buffer is None or existing_buffer.size() < src_tensor.size():
-                buffer_shape = [token_num] + list(hidden_dim)
-                new_buffer = torch.empty(
-                    buffer_shape,
-                    dtype=src_tensor.dtype,
-                    layout=src_tensor.layout,
-                    device="cpu",
-                    pin_memory=True,
-                )
-                self.pin_memory_tensor_pool[pin_memory_tag] = new_buffer
-                # self.pin_memory_tensor_pool[tensor_tag] = new_buffer
 
-            # buffer = self.pin_memory_tensor_pool[tensor_tag]
-            buffer = self.pin_memory_tensor_pool[pin_memory_tag]
-            buffer[:token_num, ...].copy_(src_tensor.detach(), non_blocking=True)
-            cpu_backup = buffer[:token_num, ...]
+            cpu_backup = torch.empty(
+                src_tensor.size(),
+                dtype=src_tensor.dtype,
+                layout=src_tensor.layout,
+                device="cpu",
+                pin_memory=True,
+            )
+
+            cpu_backup.copy_(src_tensor.detach(), non_blocking=True)
 
             copy_done_event.record(stream=self.d2h_stream)
 
@@ -1029,10 +958,6 @@ class _FineGrainedAsyncDoubleBufferGroupOffloadHandler(OffloadHandler):
         # print(f"[SUCCES wait_reload] on tensor_tag (reloading_microbatch_id, reloading_layer_id, tensor_name): {tensor_tag}")
         (copy_done_event, device_tensor) = self.reloading_tensor[tensor_tag]
         copy_done_event.synchronize() # TODO: use .wait() to check the stream with copy engine (d2h / h2d / all2all)
-        pin_memory_id = self.tensor_tag_to_pin_memory_id.pop(tensor_tag)
-        pin_memory_tag = (pin_memory_id, tensor_name)
-        self.pin_memory_tensor_pool.pop(pin_memory_tag, None)
-        self.available_pin_memory_tensor_pool_id_queue_dict[tensor_name].put(pin_memory_id)
         return
     
     
