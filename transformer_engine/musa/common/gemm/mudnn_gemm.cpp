@@ -16,6 +16,7 @@ using transformer_engine::musa::Flat2DimShape;
 using transformer_engine::musa::CreateMUTensor;
 using transformer_engine::musa::ToTorchDtype;
 using transformer_engine::musa::SetMUTensorDType;
+using transformer_engine::musa::EnableDeterministic;
 using mtfp8::next_power_of_2;
 
 const auto empty_te_tensor = Tensor();
@@ -118,6 +119,8 @@ void non_fp8_gemm(
   auto mu_o = CreateMUTensor(outputD->data, Flat2DimShape(outputD));
 
   ::musa::dnn::MatMul op;
+  CHECK_MUDNN_STATUS(
+      op.SetDeterministic(EnableDeterministic()), "SetDeterministic");
   CHECK_MUDNN_STATUS(op.SetTranspose(transb, transa), "SetTranspose");
   CHECK_MUDNN_STATUS(
       op.SetComputeMode(GetComputeModeFromCtx(ToTorchDtype(inputB->dtype()))),
@@ -175,6 +178,8 @@ void fp8_gemm(
       ? CreateMUTensor(outputD->amax): empty_mu_tensor;
 
   ::musa::dnn::BatchMatMul op;
+  CHECK_MUDNN_STATUS(
+      op.SetDeterministic(EnableDeterministic()), "SetDeterministic");
   CHECK_MUDNN_STATUS(op.SetTranspose(transb, transa), "SetTranspose");
   CHECK_MUDNN_STATUS(
       op.SetComputeMode(GetComputeModeFromCtx(ToTorchDtype(inputB->dtype()))),
@@ -497,6 +502,8 @@ void nvte_grouped_mudnn_gemm(
   auto& h = at::GetMudnnHandle();
   h.SetStream(stream);
   ::musa::dnn::GroupedMatMul op;
+  CHECK_MUDNN_STATUS(
+      op.SetDeterministic(EnableDeterministic()), "SetDeterministic");
   CHECK_MUDNN_STATUS(op.SetTranspose(transb, transa), "SetTranspose");
   CHECK_MUDNN_STATUS(op.SetDeterministic(!split_k), "SetDeterministic");
   CHECK_MUDNN_STATUS(

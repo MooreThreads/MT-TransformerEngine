@@ -1,3 +1,4 @@
+from contextlib import contextmanager
 import pytest
 import torch, torch_musa
 
@@ -19,6 +20,32 @@ from test_cast import (
     composite_blockwise_uncast,
     composite_groupwise_uncast,
 )
+
+REPEAT = 10
+
+
+@contextmanager
+def deterministic_algorithms():
+    """Temporarily enable deterministic algorithms."""
+    previous = torch.are_deterministic_algorithms_enabled()
+    previous_warn_only = torch.is_deterministic_algorithms_warn_only_enabled()
+    torch.use_deterministic_algorithms(True, warn_only=False)
+    try:
+        yield
+    finally:
+        torch.use_deterministic_algorithms(previous, warn_only=previous_warn_only)
+
+
+def assert_deterministic_result(op):
+    """Run an op repeatedly under deterministic mode and compare output bits."""
+    with deterministic_algorithms():
+        outputs = [op() for _ in range(REPEAT)]
+
+    expected_bits = outputs[0].detach().cpu().contiguous().view(torch.uint8).flatten()
+    for output in outputs[1:]:
+        output_bits = output.detach().cpu().contiguous().view(torch.uint8).flatten()
+        assert output_bits.numel() == expected_bits.numel()
+        assert torch.equal(output_bits, expected_bits)
 
 
 def get_non_fp8_tol(dtype):
@@ -42,10 +69,16 @@ def get_test_workspace():
     return torch.empty(16, dtype=torch.uint8, device=dev)
 
 
-common_m = [4096, 180]
-common_k = [2048, 4096]
-common_n = [2560, 8192, 14336]
+common_m = [4096, 180, 96]
+common_k = [2048, 4096, 20480]
+common_n = [2560, 8192, 14336, 1024]
 common_layout = ["TN", "NN", "NT"]
+
+
+def is_deterministic_mnk(M, K, N):
+    return (M, K, N) in [
+        (96, 20480, 1024),
+    ]
 
 
 def layout_matmul(weight, input, layout):
@@ -76,17 +109,22 @@ def test_non_fp8_gemm(dtype, M, K, N, layout):
 
     out_gold = layout_matmul(weight, input, layout)
 
-    out_te = torch.empty(M, N, dtype=dtype, device=dev)
     workspace = get_test_workspace()
-    general_gemm(
-        weight,
-        input,
-        workspace,
-        out_dtype=dtype,
-        out=out_te,
-        layout=layout,
-    )
-    torch.testing.assert_close(out_te, out_gold, **get_non_fp8_tol(dtype))
+    def op():
+        out_te = torch.empty(M, N, dtype=dtype, device=dev)
+        general_gemm(
+            weight,
+            input,
+            workspace,
+            out_dtype=dtype,
+            out=out_te,
+            layout=layout,
+        )
+        return out_te
+
+    torch.testing.assert_close(op(), out_gold, **get_non_fp8_tol(dtype))
+    if is_deterministic_mnk(M, K, N):
+        assert_deterministic_result(op)
 
 
 @pytest.mark.parametrize("dtypes", [
@@ -139,18 +177,21 @@ def test_f8_f8_f16_per_tensor_gemm(dtypes, scales, M, K, N, layout):
         quantizer=None,
     )
 
-    out_te = torch.empty(M, N, dtype=o_t, device=dev)
     workspace = get_test_workspace()
-    general_gemm(
-        weight_te,
-        input_te,
-        workspace,
-        out_dtype=o_t,
-        out=out_te,
-        layout=layout,
-    )
-
-    torch.testing.assert_close(out_te, out_gold, **get_fp8_tol(dtypes))
+    def op():
+        out_te = torch.empty(M, N, dtype=o_t, device=dev)
+        general_gemm(
+            weight_te,
+            input_te,
+            workspace,
+            out_dtype=o_t,
+            out=out_te,
+            layout=layout,
+        )
+        return out_te
+    torch.testing.assert_close(op(), out_gold, **get_fp8_tol(dtypes))
+    if is_deterministic_mnk(M, K, N):
+        assert_deterministic_result(op)
 
 
 @pytest.mark.parametrize("dtypes", [
@@ -228,15 +269,18 @@ def test_f8_f8_f16_mtfp8_tile_gemm(dtypes, M, K, N, layout, tile_size):
     out_gold = layout_matmul(weight_gold, input_gold, layout).to(o_t)
     assert out_gold.shape == torch.Size(out_shape)
 
-    out_te = torch.empty(out_shape, dtype=o_t, device=dev)
     workspace = get_test_workspace()
-    general_gemm(
-        weight_te,
-        input_te,
-        workspace,
-        out_dtype=o_t,
-        out=out_te,
-        layout=layout,
-    )
-
-    torch.testing.assert_close(out_te, out_gold, **get_fp8_tol(dtypes))
+    def op():
+        out_te = torch.empty(out_shape, dtype=o_t, device=dev)
+        general_gemm(
+            weight_te,
+            input_te,
+            workspace,
+            out_dtype=o_t,
+            out=out_te,
+            layout=layout,
+        )
+        return out_te
+    torch.testing.assert_close(op(), out_gold, **get_fp8_tol(dtypes))
+    if is_deterministic_mnk(M, K, N):
+        assert_deterministic_result(op)

@@ -4,6 +4,7 @@
 #include <vector>
 #include <utility>
 
+#include <ATen/Context.h>
 #include <c10/util/strides.h>
 #include <torch/csrc/utils/pycfunction_helpers.h>
 #include <torch_musa/csrc/aten/utils/Context.h>
@@ -49,6 +50,10 @@ inline ScalarType ToTorchDtype(DType te_dtype) {
       break;
   }
   return th_dtype;
+}
+
+inline bool EnableDeterministic() {
+  return at::globalContext().deterministicAlgorithms();
 }
 
 inline void SetMUTensorDType(DType te_dtype, MUTensor& m_t) {
