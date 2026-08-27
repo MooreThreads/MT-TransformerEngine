@@ -270,7 +270,12 @@ class _moe_permute_mask_map(torch.autograd.Function):
         # pylint: disable=missing-function-docstring
         if not inp.numel():
             ctx.probs = probs
-            return inp, torch.tensor([], device=inp.device), torch.tensor([], device=inp.device)
+            # Returning ``inp`` directly from a multi-output autograd Function makes
+            # PyTorch treat it as a multi-view output. Fine-grained activation
+            # offload later restores this tensor with an in-place copy, which is
+            # forbidden for such views. Give the empty activation independent
+            # storage while preserving its autograd edge.
+            return inp.clone(), torch.tensor([], device=inp.device), torch.tensor([], device=inp.device)
 
         assert inp.is_cuda, "TransformerEngine needs CUDA."
         assert routing_map.is_cuda, "TransformerEngine needs CUDA."
