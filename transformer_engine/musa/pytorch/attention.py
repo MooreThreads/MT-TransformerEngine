@@ -34,7 +34,7 @@ from transformer_engine.pytorch.distributed import (
 from transformer_engine.pytorch.graph import is_graph_capturing
 _flash_attn_version = PkgVersion(get_pkg_version("flash-attn"))
 _flash_attn_version_required = PkgVersion("2.0.6")
-_flash_attn_max_version = PkgVersion("2.6.8")
+_flash_attn_max_version = PkgVersion("2.8.4")
 _flash_attn_2_3_plus = _flash_attn_version >= PkgVersion("2.3")
 _flash_attn_2_4_plus = _flash_attn_version >= PkgVersion("2.4")
 _flash_attn_2_4_1_plus = _flash_attn_version >= PkgVersion("2.4.1")
